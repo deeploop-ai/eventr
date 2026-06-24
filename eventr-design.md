@@ -1,0 +1,1753 @@
+# eventr 需求与设计方案
+
+> 版：v2.0-draft（eventr，原 EventRouter v2）
+> 日期：2025-06-24
+> 状态：设计中（经竞品深度对比 + 40 项架构决策澄清）
+
+---
+
+## 目录
+
+1. [背景与目标](#1-背景与目标)
+2. [竞品调研与设计决策](#2-竞品调研与设计决策)
+3. [整体架构](#3-整体架构)
+4. [核心接口与 Message 模型](#4-核心接口与-message-模型)
+5. [Codec 体系](#5-codec-体系)
+6. [引擎运行时](#6-引擎运行时)
+7. [DSL 语言设计 (eql)](#7-dsl-语言设计-eql)
+8. [配置模型](#8-配置模型)
+9. [组件生态规划](#9-组件生态规划)
+10. [可观测性设计](#10-可观测性设计)
+11. [部署架构](#11-部署架构)
+12. [开发路线图](#12-开发路线图)
+
+---
+
+## 1. 背景与目标
+
+### 1.1 v1 回顾
+
+EventRouter v1 是一个轻量级 Go 事件路由库/二进制程序，围绕 `Input → Processor → Output` 模式处理 `CloudEvents`。
+
+| 能力 | 实现 |
+|------|------|
+| 管道模型 | 线性 Pipeline：Source → Input-Processors → Global-Processors → Output-Processors → Sink |
+| 事件标准 | CloudEvents 原生，traceid/spanid 注入 |
+| 并发控制 | Per-pipeline worker pool + backpressure limiter（CAS + 状态机） |
+| 可靠性 | 重试、DLQ、指数退避 |
+| 批量输出 | Sink 外包装 batch layer |
+| 可观测性 | Prometheus metrics、OTLP tracing、Webhook 通知 |
+| 插件机制 | FactoryRegistry，Go 编译时注册 |
+| 输入源 | HTTP、Kafka、Cron |
+| 输出目标 | HTTP、Kafka、gRPC、Drop、Log |
+| 处理器 | Logger、JSON 解析、Goja JS 脚本、Filter |
+
+### 1.2 eventr 目标
+
+从架构层面重新设计，功能覆盖 v1 核心能力的同时，解决以下结构性不足：
+
+- **管道拓扑过于简单** — 仅支持线性管道，无条件路由、分支合并
+- **事件模型绑定 CloudEvents** — 无法处理非 CE 协议的数据管道场景
+- **无内置数据转换语言** — 依赖 Goja JS 脚本，性能差，调试困难
+- **连接器生态薄弱** — 仅 3 输入、5 输出、4 处理器
+- **部署形态单一** — 仅单二进制，无 K8s 原生支持
+- **无配置热加载、事件重放、磁盘缓冲等生产特性**
+
+### 1.3 设计原则
+
+- **渐进复杂度** — 简单场景简单配置，复杂场景显式声明
+- **DAG 而非 Mesh** — 有向无环图约束，避免事件风暴和死锁
+- **Message 为中心** — `[]byte` payload + metadata，协议无关
+- **引擎不解析 payload** — 格式解析下沉到 Codec 插件
+- **双模式部署** — 单二进制 + K8s Operator，共享核心引擎
+- **CEL 为表达式层** — 不自研谓词语言，采用 CEL 标准 + cel-go 生产级实现
+
+---
+
+## 2. 竞品调研与设计决策
+
+### 2.1 对标项目
+
+| 项目 | 核心模式 | 关键启发 |
+|------|---------|---------|
+| **Benthos/Redpanda Connect** | Input→Processor→Output，Bloblang | Message 模型、COW 消息复制、batch.policy、AckFunc、streams mode |
+| **Vector** | Sources→Transforms→Sinks DAG | VRL fallibility 类型系统、disk buffer + overflow、route.\<id> 分支、`inputs` 内联边 |
+| **Kafka Connect** | Source/Sink + SMT | predicate-on-transform、DLQ conventions、commitRecord 可选 ack、schema registry |
+| **Knative Eventing** | Broker-Trigger | DeliverySpec、EventType CRD、CE extension attributes for DLQ |
+| **Argo Events** | EventSource→Sensor→Trigger | conditions + conditionsReset（复合事件触发） |
+| **Fluentd** | tag 路由 + buffer chunk | chunk key 分区缓冲、@ERROR label |
+| **Flume** | Source→Channel→Sink | required vs optional 边、transactional channel |
+| **OpenTelemetry Collector** | Receivers→Processors→Exporters | Connector 模式（move/copy）、OTTL、Extension |
+| **CloudEvents CESQL** | CE 属性过滤 | 评估后选用 CEL 替代（语法更协调、类型系统更强、K8s 生态） |
+| **Cloudera Envelope** | Steps + HOCON | Planner 层、Translator 层、`dependencies` 内联边、Decision/Task 步骤、DQ rules |
+
+完整竞品调研详见 `competitor-research.md`，设计评审详见 `design-review.md`。
+
+### 2.2 核心设计决策
+
+| 决策 | 选择 | 理由 |
+|------|------|------|
+| 向后兼容 | 不兼容 v1 — 全新架构 | 从架构层重新设计 |
+| 管道拓扑 | DAG（有向无环图） | 渐进复杂度，无环约束 |
+| 事件模型 | 通用 Message（`[]byte` + metadata） | 协议无关，CloudEvents 作为协议插件一等支持 |
+| 数据转换 | eql = CEL 表达式层 + 赋值扩展 | CEL 有 cel-go 生产级实现、K8s 生态、类型系统、conformance TCK |
+| 部署模型 | 双模式（单二进制 + K8s Operator） | 核心引擎统一 |
+| 扩展机制 | Go 编译时注册 + WASM（wazero） | Go 为性能主路径，WASM 为灵活性补充；v2 加 gRPC 进程外插件 |
+| 多 Pipeline | v1 支持单进程多 Pipeline | 对标 Benthos streams mode，资源效率 |
+| Codec 体系 | 统一 Codec（Decode+Encode），Source decoder / Sink encoder | 连接器矩阵 N×M → N+M |
+| Planner 层 | Transform 与 Sink 之间的写入语义层 | 解耦写入语义（append/upsert/SCD2）与传输 |
+| 赋值语义 | immutable 语义 + COW 实现 | 与 CEL 一致，fan-out 安全，纯路由零开销 |
+| DLQ 格式 | passthrough + `er-*` metadata | 对标 Kafka Connect headers / Knative CE extensions |
+
+---
+
+## 3. 整体架构
+
+### 3.1 六层架构
+
+```
+┌──────────────────────────────────────────────────────┐
+│                 Configuration Layer                   │
+│     YAML / K8s CRD  →  统一 IR  →  校验 & 默认值     │
+├──────────────────────────────────────────────────────┤
+│                  Topology Layer                       │
+│      DAG 构建  →  拓扑排序  →  Stage 实例化          │
+├──────────────────────────────────────────────────────┤
+│                   Engine Layer                        │
+│    Message 调度  →  背压控制  →  重试/DLQ  →  Ack    │
+├──────────────────────────────────────────────────────┤
+│                 Component Layer                       │
+│  Source / Transform / Planner / Sink / Codec 接口    │
+│  +  插件实现（Go 编译时 + WASM）                      │
+├──────────────────────────────────────────────────────┤
+│              Infrastructure Layer                     │
+│     Metrics ─ Tracing ─ Logging ─ Notifications      │
+└──────────────────────────────────────────────────────┘
+```
+
+### 3.2 关键架构概念
+
+| 概念 | 说明 |
+|------|------|
+| **Message** | `[]byte` payload + `map[string]any` metadata + 惰性 ParsedData，协议无关 |
+| **Stage** | DAG 节点基类：Source / Transform / Sink |
+| **Edge** | DAG 有向边，含 condition / buffer / delivery / route / required |
+| **Codec** | 格式编解码器（Decode+Encode），Source 用 decoder，Sink 用 encoder |
+| **Planner** | 写入语义层（append/upsert/history/bitemporal），坐在 Transform 与 Sink 之间 |
+| **ParsedData** | 惰性解析后的 payload 结构（`any`，v1 为 `map[string]any`） |
+| **COW** | Copy-on-Write 消息复制——ShallowCopy 共享 ParsedData + atomic readOnly flag，首次写才 clone |
+| **refCount** | 消息到达的 Sink 副本数，fanOut 时动态计算，归零触发 Ack |
+| **BatchCollector** | 引擎拥有的攒批工具，攒满后调 Sink.Write |
+| **Pipeline** | 一个 TopologyIR 的运行时实例，独立 Stage/Edge/refCount/Ack |
+| **Engine** | 管理多个 Pipeline 的进程级运行时 |
+
+---
+
+## 4. 核心接口与 Message 模型
+
+### 4.1 Message
+
+```go
+type Message struct {
+    ID        string           // 唯一标识，引擎自动生成
+    Payload   []byte           // 事件负载 — 任意格式的字节序列（原始值，re-serialize 前不动）
+    Metadata  map[string]any   // 元数据 — 携带上下文信息
+    
+    // 引擎内部字段 — 不对外暴露
+    parsedData    any          // 惰性解析后的结构（nil = 未解析）
+    parsedDirty   bool         // ParsedData 是否被 Transform 修改
+    parsedCodec   string       // 声明的 codec 名（用于惰性 parse）
+    readOnly      atomic.Bool  // COW flag — true 时 parsedData 共享只读，首次写需 clone
+    originalPayload []byte     // re-serialize 前备份的原始 payload（DLQ 用）
+    ctx           context.Context
+    ackFn         func(error)  // 引擎注入的确认回调
+    errCount      int          // 累计错误次数
+}
+```
+
+**设计要点：**
+
+- `Payload` 是 `[]byte` — 引擎不关心内容，解析由 Codec 按需完成
+- `parsedData` 惰性解析 — 首次 `payload.*` 访问或 Transform 写 payload 路径时才调 `codec.Decode(payload)`
+- `parsedDirty` 标记 — Transform 修改 ParsedData 后置 true，序列化推迟到 Sink 前
+- `readOnly` COW flag — fan-out ShallowCopy 时共享 parsedData + 置 readOnly=true，Transform 首次写时检测 flag → clone-on-first-write
+- `originalPayload` — 引擎在 re-serialize 前备份原始 Payload（切片引用，零拷贝），Sink error 时 DLQ 从此取原始 payload
+- `ackFn` 引擎私有注入 — 管 refCount，归零时触发；不对外暴露
+
+### 4.2 Stage
+
+```go
+type Stage interface {
+    ID() string
+    Type() StageType
+    Init(ctx context.Context) error
+    Stop(ctx context.Context) error
+    HealthCheck(ctx context.Context) HealthStatus
+}
+
+type StageType int
+const (
+    StageSource    StageType = iota
+    StageTransform
+    StageSink
+)
+
+type HealthStatus struct {
+    Healthy bool
+    Message string
+    Since   time.Time
+}
+```
+
+### 4.3 Source
+
+```go
+// Source — 生产消息（DAG 入口，无入边）
+type Source interface {
+    Stage
+    Consume(ctx context.Context, out chan<- *Message) error
+}
+
+// AckingSource — 可选接口，支持 at-least-once 的 Source 实现
+type AckingSource interface {
+    Source
+    OnAck(msg *Message, err error)  // 引擎在消息 Ack 时回调
+}
+
+// PollingSource — pull 源辅助接口（框架提供定时调用 + 并发控制）
+type PollingSource interface {
+    Stage
+    Poll(ctx context.Context) ([]*Message, error)
+    Interval() time.Duration
+}
+```
+
+**push 源**（Kafka/HTTP）：实现 `Consume`，持续产出消息到 out channel，背压通过 channel 阻塞传导。
+
+**pull 源**（S3/SQS/CDC）：实现 `PollingSource`，引擎 wrapper 按 Interval 定时调用，空轮询退避（×2，上限 max_interval 默认 5min），pending 队列管理 + 背压时跳过本轮 Poll。
+
+**Ack 机制**：
+- 引擎注入 `ackFn` 管 refCount（Message 私有字段）；
+- ackFn 触发时引擎调 `Source.OnAck(msg, err)`（如果 Source 实现了 AckingSource）；
+- Kafka Source 实现 AckingSource，在 OnAck 里管 per-partition low-watermark offset commit；
+- HTTP/Cron 不实现 AckingSource，ackFn 触发时 no-op + 日志；
+- Source 文档标注 at-least-once / at-most-once 能力。
+
+### 4.4 Transform
+
+```go
+// Transform — 转换消息（DAG 中间节点，有入边有出边）
+// 批次入、批次出 — 支持窗口聚合、fan-in、去重等场景
+type Transform interface {
+    Stage
+    Process(ctx context.Context, batch []*Message) ([]*Message, error)
+}
+```
+
+- 接收一个 batch 返回零个或多个消息；
+- 返回 nil → 丢弃所有消息；
+- 返回多条 → 拆分（fan-out via split）；
+- Transform 返回新值不 mutate 入参（immutable 语义 + COW 实现）。
+
+### 4.5 Sink
+
+```go
+// Sink — 消费消息（DAG 出口，无出边）
+type Sink interface {
+    Stage
+    Write(ctx context.Context, msgs []*Message) error   // 引擎攒好 batch 后调用
+    Flush(ctx context.Context) error                      // 停机时引擎调
+    Stop(ctx context.Context) error                       // 资源释放
+}
+```
+
+- **引擎拥有攒批** — 引擎在 Sink 前内置 BatchCollector（size/timeout/max_bytes），攒满后调 `Sink.Write(msgs)`；
+- Sink 作者只实现写入逻辑，不实现攒批；
+- timeout flush 由引擎内部 timer 触发；
+- 停机时引擎调 `Flush()`（强制写出 BatchCollector 里未满的残余 batch）；
+- 部分失败 = 整 batch retry（Write 返回 error），v2 可扩展 per-message error。
+
+### 4.6 Planner
+
+```go
+// Planner — 解耦写入语义与 Sink 传输（来自 Envelope 启发）
+// 坐在 Transform 出口与 Sink 之间，决定"如何把记录应用到目标"
+type Planner interface {
+    Stage
+    Plan(ctx context.Context, incoming []*Message, sink LookupSink) ([]*Mutation, error)
+}
+
+type MutationType int
+const (
+    MutationInsert MutationType = iota
+    MutationUpdate
+    MutationUpsert
+    MutationDelete
+)
+
+type Mutation struct {
+    Type MutationType
+    Key   []byte
+    Row   []byte
+}
+```
+
+| Planner | 语义 | 优先级 |
+|---|---|---|
+| `append` | 仅插入 | P0 |
+| `upsert` | 按 key 插入或更新 | P0 |
+| `drop` | 丢弃（测试用） | P0 |
+| `history` | Type 2 SCD — effective-from/to 区间 + current flag | P1 |
+| `merge` | 合并写入 | P1 |
+| `bitemporal` | 双时态 — event-time + system-time | P2 |
+| `eventtimeupsert` | 按 event time + 自然 key upsert | P2 |
+
+### 4.7 Edge
+
+```go
+type Edge struct {
+    From      string
+    To        string
+    Condition string             // CEL 表达式，空 = 始终转发
+    Route     string             // route Transform 的命名路由（自动生成 condition）
+    Predicate string             // 对 To 端 Transform 的条件应用（Kafka Connect 风格）
+    Buffer    EdgeBufferConfig
+    Delivery  *DeliverySpec      // retry/timeout/DLQ，正交于路由
+    Required  *bool              // 默认 true；false = best-effort 边（Flume 启发）
+}
+
+type EdgeBufferConfig struct {
+    Type      BufferType         // memory | disk | overflow
+    Size      int                // memory buffer 大小，默认 64
+    Strategy  BufferStrategy     // block | drop_newest | drop_oldest
+    Key       []string           // 分区键（Fluentd chunk key 风格，v2）
+    DiskPath  string             // type=disk/overflow 时
+    DiskMaxSize int64            // 磁盘缓冲上限
+    DiskSyncInterval time.Duration  // fsync 间隔，默认 500ms
+}
+
+type DeliverySpec struct {
+    Retry    *RetryConfig
+    Timeout  time.Duration
+    DLQ      string              // 引用 DLQ sink stage ID
+}
+
+type BufferType int
+const (
+    BufferMemory BufferType = iota
+    BufferDisk
+    BufferOverflow  // memory 满 → 溢写 disk
+)
+
+type BufferStrategy int
+const (
+    StrategyBlock BufferStrategy = iota
+    StrategyDropNewest
+    StrategyDropOldest
+)
+```
+
+---
+
+## 5. Codec 体系
+
+### 5.1 统一 Codec 接口
+
+```go
+type Codec interface {
+    Decode(payload []byte) (any, error)           // Source 侧（decoder）
+    Encode(data any) ([]byte, error)               // Sink 侧（encoder）
+    OutputType() cel.Type                          // CEL TypeChecker 用
+    ValidateConfig(config map[string]any) error    // 启动期校验
+}
+```
+
+- **统一 Codec**：一个 Codec 同时实现 Decode 和 Encode，注册一次；
+- **Source 用 decoder**，**Sink 用 encoder**，引用同一个 Codec；
+- v1 所有 codec 的 Decode 返回 `map[string]any` 或 `[]any`（Protobuf 内部转 map，v2 演进到原生 struct）；
+- `OutputType()` 用于 CEL TypeChecker：json/avro/csv 返回 `cel.MapType(cel.StringType, cel.DynType)`。
+
+### 5.2 Codec 配置共享
+
+顶层 `codecs:` 段声明命名 codec 配置，Source/Sink 用 `ref` 引用：
+
+```yaml
+codecs:
+  - name: avro-orders
+    type: avro
+    config:
+      schema: { "type":"record","name":"Order",... }
+      registry: confluent
+      registry_url: http://schema-registry:8081
+
+stages:
+  - id: kafka-in
+    type: source
+    plugin: kafka
+    decoder: { ref: avro-orders }
+  - id: kafka-out
+    type: sink
+    plugin: kafka
+    encoder: { ref: avro-orders }
+```
+
+**同时支持 inline 声明**（简单 codec 无需 ref）：
+
+```yaml
+decoder: json               # 字符串简写（无配置 codec）
+decoder: { type: json }     # 对象形式（有配置时）
+decoder: { ref: avro-base, config: { schema: "..." } }  # ref + Stage 级 config shallow merge 覆盖
+```
+
+### 5.3 校验规则
+
+- `ref` 引用不存在的 codec name → 启动期报错；
+- codec name 重复 → 启动期报错；
+- codec `type` 不是已注册的 codec 插件 → 启动期报错；
+- `ValidateConfig` 失败 → 启动期报错；
+- ref + Stage 级 config = shallow merge（顶层 key 覆盖，不递归合并）。
+
+### 5.4 ParsedData 惰性双轨
+
+```
+Source 产出 Message（Payload=[]byte, parsedData=nil, parsedCodec="json")
+    │
+    ▼ 首次 payload.* 访问 或 Transform 写 payload 路径
+引擎调 codec.Decode(Payload) → parsedData = map[string]any
+    │
+    ▼ Transform 修改 parsedData（COW: readOnly→clone→改→parsedDirty=true）
+    │
+    ▼ 交付 Sink 前
+引擎检测 parsedDirty:
+    true  → 调 codec.Encode(parsedData) → 覆盖 Payload（re-serialize）
+            备份原始 Payload 到 originalPayload（零拷贝切片引用）
+    false → Payload 保持原始 []byte（零开销，纯路由场景）
+    │
+    ▼ Sink.Write(msgs)
+```
+
+**关键规则：**
+- 未配 decoder 时引用 `payload.*` → 启动期静态分析报错（显式报错，不自动探测，不静默 nil）；
+- fan-out 时 ShallowCopy Message（共享 parsedData 指针 + readOnly=true）；
+- Transform 首次写 parsedData 时检测 readOnly → clone-on-first-write → 后续同 Transform 内原地改；
+- 纯路由/filter 场景永不 clone，零开销；
+- 无需回滚机制（输入从未被修改）；
+- 中间路径自动创建（`payload.a.b.c = 1` 且 `payload.a.b` 不存在 → 自动建空 map）。
+
+### 5.5 Metadata 保留字段同步
+
+引擎自动同步的保留字段（用户写无效，被覆盖）：
+
+| 保留字段 | 谁填 | 何时刷新 |
+|---|---|---|
+| `content-type` | Sink encoder 推断 | Sink 序列化时 |
+| `content-length` | 引擎 | Sink 序列化后 |
+| `ce-specversion` / `ce-id` / `ce-type` / `ce-source` / `ce-subject` | CE Source 插件 | Source 入口 |
+| `ce-time` | CE Source 或引擎 | Source 入口（可选 Transform 后刷新） |
+
+业务字段（`kafka.key` / `trace_id` / hash 等）用户负责。所有非保留字段 = 用户字段，引擎不触碰。
+
+---
+
+## 6. 引擎运行时
+
+### 6.1 核心概念
+
+```
+                        ┌──────────────────────────────────┐
+                        │            Engine                 │
+                        │                                  │
+  Source.Consume() ──▶  │  fanOut  ──[Edge Buf]── fanIn   │──▶ Transform.Process()
+                        │    │                            │         │
+                        │    │  条件路由                    │    fanOut│
+                        │    ├──[Buf]──▶ Sink.Write()     │         │
+                        │    │                            │    ┌────┴────┐
+                        │    └──[Buf]──▶ Sink.Write()     │    │ 条件路由 │
+                        └──────────────────────────────────┘    └────┬────┘
+                                                              ┌────┴────┐
+                                                           [Buf]     [Buf]
+                                                              │        │
+                                                           Sink A   Sink B
+```
+
+| 概念 | 说明 |
+|------|------|
+| **fanOut** | 拿到一条 Message，对每条出边评估 Condition（CEL 表达式）；匹配则克隆消息（ShallowCopy + readOnly）送入边缓冲 |
+| **fanIn** | goroutine，select merge 多条入边的消息到一个 channel，供下游 Stage 消费 |
+| **Edge Buffer** | 有界 Channel，配置 `type`（memory/disk/overflow）+ `strategy`（block/drop_newest/drop_oldest） |
+| **refCount** | fanOut 时动态计算 = 本次实际匹配的出边数（非拓扑可达 sink 数），每条匹配边克隆的消息持有同一个原子计数器 |
+| **BatchCollector** | 引擎在 Sink 前内置的攒批工具（size/timeout/max_bytes），攒满后调 Sink.Write |
+| **COW** | ShallowCopy 共享 ParsedData + atomic readOnly flag，Transform 首次写时 clone-on-first-write |
+
+### 6.2 背压传播
+
+```
+Sink(http) 写入慢
+    │
+    ▼
+write dispatch channel 满（所有 writer goroutine 在 Write 中）
+    │
+    ▼
+batch collector 阻塞（无法投递新 batch）
+    │
+    ▼
+Edge Buffer 满 (strategy=block)
+    │
+    ▼
+fanOut 发送阻塞
+    │
+    ▼
+Transform output channel 满 → worker 阻塞
+    │
+    ▼
+Transform 的 fanIn channel 堆积
+    │
+    ▼
+上游 Edge Buffer 满
+    │
+    ▼
+Source.Consume() 的 out channel 阻塞
+    │
+    ▼
+Source 内部拉取变慢（Kafka consumer pause / HTTP 429）
+```
+
+背压是**自动传播**的 — 只要边缓冲设对策略，不需要引擎显式控制。
+
+### 6.3 Ack 链路
+
+```
+Source(Kafka) 产出 msg
+    │
+    ▼ 引擎注入 ackFn（管 refCount）
+    │
+fanOut 评估出边 condition → 匹配 2 条边 → refCount=2
+    ├──▶ Sink A  ✅  refCount → 1
+    └──▶ Sink B  ✅  refCount → 0
+               │
+               ▼
+          ackFn(nil) → 引擎调 Source.OnAck(msg, nil) → Kafka Source commit offset
+```
+
+**失败处理：**
+
+```
+fanOut 匹配 2 条边 → refCount=2
+    ├──▶ Sink A  ✅  refCount → 1
+    └──▶ Transform ❌ err（重试耗尽）
+              │
+              ▼
+          refCount → 0, ackFn(error)
+              │
+              ▼
+          引擎调 Source.OnAck(msg, err) → Kafka 不 commit offset → 重启重投
+```
+
+**关键规则：**
+1. refCount = fanOut 时**实际匹配的出边数**（动态计算，非静态可达 sink 数）
+2. 任何路径失败（重试耗尽后），立即触发 Ack 并带上错误
+3. Source 收到 OnAck 后自行决定：确认（commit offset）/ 不确认（重投）/ 投 DLQ
+4. Sink 级 DLQ 可在 Sink 插件内实现 — 引擎不强制
+
+**Transform split 的 Ack 聚合：**
+
+Transform 返回 N 条子消息时，引擎自动建立"子消息 refCount → 父消息 ackFn"的聚合链——子消息全部完成（成功或失败）后父消息才 Ack（Benthos split 模型）。Transform 作者不处理 Ack。
+
+### 6.4 goroutine 模型
+
+```
+Pipeline（per Pipeline supervisor goroutine — panic recover + graceful stop）
+│
+├── Source-1: Consume goroutine (1)
+│     └── out channel
+│           └── [edge buffer channel]
+│                 └── Transform-A: fanIn goroutine (1) → in channel
+│                       ├── worker goroutine (N)  ← 从 in channel 竞争消费
+│                       │     └── output channel
+│                       └── fanOut goroutine (1)  ← 从 output channel 读
+│                             ├── [edge buffer channel] → Transform-B fanIn
+│                             └── [edge buffer channel] → Transform-C fanIn
+│
+├── Transform-B: fanIn (1) → workers (N) → fanOut (1)
+│     └── [edge buffer channel] → Sink-1
+│
+├── Sink-1:
+│     batch collector goroutine (1)     ← 从 edge buffer 拉 → 攒批 → 投递 write dispatch channel
+│     writer goroutine (max_in_flight)  ← 默认 1，从 write dispatch channel 竞争取 batch → Sink.Write
+│
+└── Engine supervisor goroutine (1 per 进程)
+      信号处理 + Pipeline 生命周期 + metrics/health endpoint
+```
+
+**per-Stage goroutine 数量：**
+
+| Stage 类型 | goroutine 数 | 公式 |
+|---|---|---|
+| Source（push） | 1 | Consume |
+| Source（pull） | 1 | PollingSource wrapper |
+| Transform | 2 + workers | fanIn(1) + workers(N) + fanOut(1) |
+| Sink | 1 + max_in_flight | batch collector(1) + writer(max_in_flight) |
+
+**Sink max_in_flight + ordering：**
+
+```yaml
+sink:
+  ordering: ordered      # 默认 — max_in_flight 强制为 1（启动期校验冲突报错）
+  # 或
+  ordering: unordered    # 允许 max_in_flight > 1，不保证顺序
+  max_in_flight: 3       # 默认 1
+```
+
+- `ordered`：max_in_flight 必须为 1，保证消息顺序；
+- `unordered`：允许 max_in_flight > 1，1 batch collector + N writer goroutine 并发 Write（对标 Benthos AsyncWriter），不保证顺序；
+- per-partition ordering（Option C）v2 引入（与 buffer.key 一起）；
+- offset/ack 下沉 Source 插件（low-watermark 连续 commit，引擎不感知 offset）。
+
+### 6.5 重试与 DLQ
+
+**错误分类与处理：**
+
+| 错误类型 | 位置 | retry | DLQ |
+|---|---|---|---|
+| DSL error / Codec decode error / edge condition error | Transform/edge | 默认**不重试**（确定性错误） | pipeline 级 DLQ |
+| Sink 写入失败 | Sink | 默认**重试**（指数退避，瞬时错误） | Stage 级 DLQ → fallback pipeline 级 |
+| Source 读取失败 | Source | Source 内部处理 | N/A |
+| DSL 编译错误 | 启动期 | N/A | 启动失败 |
+
+**DLQ fallback 链：** Stage 级 DLQ > Pipeline 级 DLQ > 丢弃 + error metric。
+
+**DLQ 是 Sink stage 引用**（非独立概念）：
+
+```yaml
+dlq:
+  sink: dlq-kafka          # 引用 stages 里的 sink stage ID
+  include_current_payload: false   # 可选：附带 error 发生时的当前 payload（base64 存 metadata）
+
+stages:
+  - id: dlq-kafka
+    type: sink
+    plugin: kafka
+    config: { topic: orders-dlq, ... }
+```
+
+**DLQ 消息格式：** passthrough 模式——DLQ 消息 payload = **原始 payload**（进入 pipeline 时的字节）；error 信息写入 metadata 用 `er-` 前缀。
+
+| 字段 | 说明 |
+|---|---|
+| `er-error-reason` | 人类可读错误描述 |
+| `er-error-type` | `dsl_function_error` / `codec_decode_error` / `sink_write_error` / `edge_condition_error` / `wasm_error` |
+| `er-error-stage` | 错误发生的 stage ID |
+| `er-error-timestamp` | error 发生时间 RFC 3339 |
+| `er-original-pipeline` | pipeline 名称 |
+| `er-original-source` | Source stage ID |
+| `er-retry-count` | 重试次数（确定性错误为 0） |
+| `er-original-topic` | Kafka topic（如适用） |
+| `er-original-partition` | Kafka partition（如适用） |
+| `er-original-offset` | Kafka offset（如适用） |
+| `er-current-payload` | error 发生时的当前 payload base64（仅 include_current_payload=true） |
+
+### 6.6 优雅停机与热加载
+
+**停机顺序：**
+
+```
+Stop 信号 (SIGTERM/SIGINT)
+    │
+    ▼
+1. 通知所有 Source.Stop() — 停止产出新消息
+    │
+    ▼
+2. 等待所有 Pipeline 中所有 in-flight Message refCount → 0（drain_timeout 默认 30s）
+    │
+    ▼
+3. drain 超时 → drop 在途消息 + Source 不 Ack（offset 不 commit，下次重投）
+    │  （在途消息不进 DLQ — 非 error 消息；at-least-once 保证不丢）
+    │
+    ▼
+4. 关闭所有 Transform 的 in channel → worker 自然退出
+    │
+    ▼
+5. 调用所有 Sink.Flush() → 触发 BatchCollector 写出残余 batch
+    │  Flush 失败 → 不 Ack（下次重投）
+    │
+    ▼
+6. Sink.Stop() → Transform.Stop() → Source 资源释放
+```
+
+**热加载（单 Pipeline 级）：**
+
+```
+POST /admin/reload/{pipeline_name}  或  SIGHUP（全进程）
+    │
+    ▼
+1. 读取新配置（不停止旧 Pipeline）
+    │
+    ▼
+2. 解析 + 校验新 TopologyIR（全部启动期校验规则）
+    │
+    ├─ 校验失败 → 保留旧 Pipeline + HTTP 400 + 错误详情
+    │
+    ▼ 校验通过
+3. graceful stop 旧 Pipeline（drain → stop）
+    │
+    ▼
+4. 用新 TopologyIR 构建全新 DAG → 启动新 Pipeline
+    │
+    ▼ 30-60s gap（drain + 新启动，接受，对标 Benthos）
+5. HTTP 202 + task ID（异步，轮询 status）
+```
+
+**热加载 API：**
+
+| API | 行为 |
+|---|---|
+| `POST /admin/reload` | 全进程所有 Pipeline 重载 |
+| `POST /admin/reload/{name}` | 单 Pipeline 重载 |
+| `GET /admin/reload/status/{task_id}` | 轮询重载状态 |
+| `GET /admin/pipelines` | 列出所有 Pipeline 及状态 |
+| `GET /admin/pipelines/{name}/status` | 单 Pipeline 状态 |
+| 409 | 该 Pipeline 正在重载中（拒绝并发重载） |
+
+v1 不做 fsnotify 文件监听（v2 评估）。K8s Operator 通过调 `POST /admin/reload/{name}` 触发重载。
+
+### 6.7 多 Pipeline 隔离
+
+单进程多 Pipeline，每 Pipeline 独立 Stage/Edge/refCount/Ack。
+
+**隔离级别（档②中等隔离）：**
+
+| 资源 | 隔离方式 |
+|---|---|
+| goroutine / worker | per-Pipeline `max_workers` 上限 |
+| 内存 | per-Pipeline `max_inflight_messages` 上限（超限反压 Source） |
+| Edge buffer | 每 Pipeline 独立（天然隔离） |
+| refCount/Ack | 每 Pipeline 独立（天然隔离） |
+| Source 连接 | 每 Pipeline 独立（不共享 Stage 实例） |
+| panic | goroutine recover 防单 Pipeline panic 杀进程 |
+| metrics/tracing | 共享 endpoint + `pipeline` label 区分 |
+| 热加载 | 单 Pipeline 级 |
+
+```yaml
+engine:
+  max_workers_per_pipeline: 16       # 全局默认
+  max_inflight_per_pipeline: 10000   # 全局默认
+
+# pipeline 级可覆盖
+spec:
+  engine:
+    max_workers: 32
+    max_inflight: 50000
+```
+
+### 6.8 Edge Disk Buffer
+
+**WAL 格式：** `[msg_len(4B)][payload(msg_len)][meta_len(4B)][metadata(meta_len)]` 二进制追加。
+
+**分段文件：** 每文件默认 64MB（`disk_segment_size` 可配）。
+
+**fsync：** 周期 fsync，默认 500ms（`disk_sync_interval` 可配）。
+
+**恢复：** 启动时扫描所有 segment 文件，按文件名排序重建消息队列。独立 offset 文件记录每 segment 消费位置（周期 fsync）。segment 全消费后删除。
+
+**overflow：** `type: overflow` = memory 满 → 溢写 disk，disk 满 → `when_full: block|drop_newest|drop_oldest`。从 disk 读时先排空 disk 再回 memory channel。
+
+**崩溃恢复：** WAL 恢复的消息重新走 pipeline，接受 at-least-once 重复（用户幂等兜底）。
+
+**disk buffer 的核心价值：** 解耦 Source 消费速度与 Sink 写入速度——Sink 慢时消息存磁盘而非阻塞 Source。
+
+---
+
+## 7. DSL 语言设计 (eql)
+
+### 7.1 设计目标
+
+eql = **CEL 表达式层**（谓词 + 值计算）+ **eql 赋值扩展**（`.path = expr`、`del()`）+ **eventr 注册的 CEL 自定义函数**。
+
+| 目标 | 说明 |
+|------|------|
+| CEL 原生表达式 | if/else macro、函数调用、算术、比较、逻辑 — cel-go 内置 |
+| 赋值扩展 | `path = expr`（eql 扩展，CEL 无赋值）、`del(path)`（eql 扩展语句） |
+| 无管道、无模板 | 不引入 `\|` 和 `${}`——多步变换用函数嵌套，字符串拼接用 `format()` 或 `+` |
+| 无 statement-level if | v1 用 if 表达式 + else 分支引用原值；v2 视需求加 |
+| 安全运行 | 纯 Go 实现（cel-go），编译期类型检查 |
+
+### 7.2 路径语法
+
+统一 CEL 语法（**无点号前缀**，推翻 jq 风格）：
+
+```
+# CEL 变量
+payload         — ParsedData（惰性解析后的 payload 结构）
+metadata        — Metadata map
+input           — 原始输入快照（只读，赋值前的原始值）
+
+# 路径导航
+payload.total                — 字段访问
+payload.orders[0].id         — 数组索引 + 链式导航
+metadata["content-type"]     — 含特殊字符的 key 用 []
+metadata.trace_id            — 标识符安全的 key 用 .
+```
+
+### 7.3 赋值（Mapping）
+
+```eql
+# 字段赋值
+payload.total = payload.price * payload.quantity
+
+# 新建嵌套对象（中间路径自动创建）
+payload.enriched.source = "order-service"
+payload.enriched.timestamp = now()
+
+# 从 metadata 复制到 payload
+payload.trace_id = metadata.trace_id
+
+# 条件赋值（CEL 原生 if 表达式）
+payload.priority = if payload.total > 1000 { "high" } else { "normal" }
+
+# 删除字段
+del(payload.internal)
+del(metadata["x-debug"])
+
+# 整体替换
+payload = json(payload)
+
+# 跨命名空间赋值
+metadata["x-trace"] = payload.trace_id
+```
+
+**赋值语义（immutable + COW）：**
+- 每条赋值在 COW 副本上 set 字段；
+- 后续赋值的右边读**当前副本**（含之前所有赋值结果，累积可见）；
+- `input.x` 访问原始输入快照（只读，不受赋值影响）；
+- CEL 表达式层无状态，赋值层有状态顺序执行，两层职责分离。
+
+### 7.4 过滤（Filter / Edge Condition）
+
+纯 CEL 表达式，求值为 Boolean：
+
+```eql
+# 比较
+payload.total > 100
+payload.status == "paid"
+
+# 集合
+metadata.region in ["us", "eu", "apac"]
+payload.tags.contains("vip")           # CEL 原生 contains
+payload.email.matches(r'^[a-z]+@.*\.com$')  # CEL 原生 matches
+
+# 存在性
+has(payload.email)                      # CEL 原生 has()
+!has(metadata.debug)
+
+# 逻辑
+payload.total > 100 && metadata.region == "us"
+payload.status == "paid" || payload.status == "confirmed"
+
+# 时间比较
+now() - payload.created > duration("1h")
+```
+
+### 7.5 函数库
+
+**CEL 原生函数**（camelCase，cel-go 内置）：
+
+| 函数 | 说明 |
+|---|---|
+| `int(v)` / `double(v)` / `string(v)` / `bool(v)` | 类型转换 |
+| `type(v)` | 返回类型 |
+| `size(s)` / `size(arr)` | 长度 |
+| `contains(s, sub)` | 包含检查 |
+| `matches(s, regex)` | 正则匹配 |
+| `has(field)` | 存在性检查 |
+| `all()` / `exists()` / `exists_one()` / `map()` / `filter()` | 宏 |
+| `format(fmt, args)` | 格式化字符串 |
+| `timestamp(s)` | RFC 3339 字符串转 timestamp |
+| `duration(s)` | 字符串转 duration |
+| `a ?? b` | coalesce（第一个非 nil 值） |
+
+**eventr 注册函数**（snake_case，通过 cel-go `cel.Function()` 注册）：
+
+| 类别 | 函数 | 说明 |
+|------|------|------|
+| **时间** | `now()` | 当前 UTC 时间（返回 cel.TimestampType） |
+| | `parse_time(s, layout)` | strftime layout 解析 |
+| | `format_time(t, layout)` | strftime layout 格式化 |
+| **字符串** | `uppercase(s)` / `lowercase(s)` | 大小写转换 |
+| | `trim(s)` / `trim_prefix(s, p)` | 修剪 |
+| | `split(s, sep)` | 分割为数组 |
+| | `join(arr, sep)` | 拼接为字符串 |
+| | `replace(s, old, new)` | 替换 |
+| **数学** | `min(a, b)` / `max(a, b)` | 最小/最大值 |
+| | `abs(n)` / `ceil(n)` / `floor(n)` | 数学运算 |
+| **JSON** | `json(v)` | 解析 JSON 字符串为 map |
+| | `to_json(v)` | 序列化为 JSON 字符串 |
+| **类型** | `array(v)` | 类型转换为数组 |
+| | `typeof(v)` | 返回类型名（eventr 扩展，与 CEL `type()` 不同） |
+| **UUID/ID** | `uuid()` | 生成 UUID v4 |
+| | `hash(s)` | SHA256 哈希 |
+| **编码** | `base64_encode(s)` / `base64_decode(s)` | Base64 编解码 |
+| | `coalesce(a, b, ...)` | 返回第一个非 nil 值 |
+
+### 7.6 完整 mapping 示例
+
+```eql
+# 解析 JSON 字符串为对象
+payload = json(payload)
+
+# 删除内部字段
+del(payload._internal)
+
+# 计算
+payload.total = payload.price * payload.quantity
+payload.discount_amount = payload.total * payload.discount
+
+# 丰富
+payload.ingested_at = format_time(now(), "%Y-%m-%dT%H:%M:%SZ")
+payload.source = "order-pipeline"
+payload.trace_id = metadata.trace_id
+
+# 条件分类（CEL 原生 if 表达式）
+payload.tier = if payload.total > 10000 {
+    "enterprise"
+} else if payload.total > 1000 {
+    "business"
+} else {
+    "standard"
+}
+```
+
+### 7.7 编译与执行
+
+```
+DSL 字符串 → eql Parser（赋值语句 + CEL 表达式）
+    │
+    ├─ CEL 表达式 → cel-go TypeChecker（类型检查）
+    │
+    ├─ 静态字段引用检查（有 schema 时，未声明字段 → warning）
+    │
+    ├─ 路径引用检查（引用 payload.* 但未配 decoder → 启动期报错）
+    │
+    ▼ 编译为可执行程序
+执行阶段（每个 Message）：
+    - 赋值语句顺序执行，COW 副本上 set/del
+    - CEL 表达式从当前副本读取求值
+    - 字段不存在返回 nil（不 panic）
+    - 类型不匹配 → false（filter 不通过）
+    - 函数调用失败 / 除零 / 非法正则 → error → retry/DLQ
+```
+
+### 7.8 错误处理
+
+| 错误类型 | filter Transform | edge condition |
+|---|---|---|
+| 字段不存在 | false（不通过）+ debug metric | false（不匹配此边） |
+| 类型不匹配 | false（不通过）+ debug metric | false（不匹配此边） |
+| 函数调用失败 | error → retry/DLQ | error → 整条消息进 error 处理 |
+| 除零 / 索引越界 | error → retry/DLQ | error → 整条消息进 error 处理 |
+| 非法正则 | error → retry/DLQ | error → 整条消息进 error 处理 |
+| 编译错误 | 启动期失败 | 启动期失败 |
+
+**`error_mode` 配置（全局或 per-stage）：**
+
+| 值 | 行为 |
+|---|---|
+| `propagate`（默认） | 按上表规则 |
+| `ignore` | 所有 error 当 false，不进 DLQ，只记 metric |
+| `silent` | 同 ignore 但不记 metric/log |
+
+### 7.9 编译期检查强度
+
+**v1 档②（CEL TypeChecker + 静态字段引用检查）：**
+- CEL 表达式层走 cel-go TypeChecker（`data.total + "foo"` 编译失败）；
+- 有 schema 时（Codec 声明 schema / Source 配 `expected_fields`），未声明字段报 **warning**（非 error）；
+- 无 schema 时退化为档①（仅 CEL TypeChecker）；
+- 路径引用检查（引用 `payload.*` 但未配 decoder → 启动期报错）。
+
+**v2 演进档③（VRL 风格 fallibility 类型系统）：**
+- 每个函数标注 fallible / infallible；
+- `int(data.total)!`（断言不失败）/ `int(data.total) ?? 0`（兜底）/ `n, err = int(data.total)`（显式处理）；
+- 未处理的 fallible 调用编译失败；
+- v1 函数内部预留 fallibility 标注，v2 编译器升级后自动激活。
+
+### 7.10 route Transform
+
+route Transform 是 map 的语法糖——内部生成 `if/else if/else` DSL 写 `metadata['er-route']`，引擎不特殊处理。
+
+```yaml
+- id: classify
+  type: transform
+  plugin: route
+  config:
+    action: move          # v1 只做 move（first-match switch-case）；copy（fan-out 多 route）v2
+    routes:
+      us: "payload.region == 'us'"
+      eu: "payload.region == 'eu'"
+      _default: "true"    # fallback
+
+edges:
+  - from: classify
+    to: us-sink
+    route: us              # 不写 condition，写 route 名 → 自动生成 condition
+  - from: classify
+    to: eu-sink
+    route: eu
+  - from: classify
+    to: dlq-sink
+    route: _default
+```
+
+引擎看到 edge 有 `route: us` → 自动生成 `condition: "metadata['er-route'] == 'us'"`。
+
+---
+
+## 8. 配置模型
+
+### 8.1 设计原则
+
+1. **线性场景简单** — `depends_on` 内联边（Envelope/Vector 风格语法糖），引擎自动展开为 Edge
+2. **复杂场景明确** — 显式声明 `stages` + `edges` 表达 DAG
+3. **统一 IR** — YAML 和 K8s CRD 解析为同一份 `TopologyIR`
+4. **环境变量自动覆盖** — 支持 `${ENV_VAR}` 替换（v1 在 YAML 层实现，v2 评估 HOCON 格式）
+
+### 8.2 场景一：简单线性（depends_on 语法糖）
+
+```yaml
+apiVersion: eventr/v1
+kind: Pipeline
+metadata:
+  name: order-processing
+
+stages:
+  - id: kafka-source
+    type: source
+    plugin: kafka
+    decoder: json
+    config:
+      brokers: [localhost:9092]
+      topics: [orders]
+      group_id: order-consumer
+
+  - id: enrich
+    type: transform
+    plugin: map
+    depends_on: [kafka-source]
+    workers: 8
+    config:
+      dsl: |
+        payload = json(payload)
+        payload.total = payload.price * payload.quantity
+
+  - id: filter-high
+    type: transform
+    plugin: filter
+    depends_on: [enrich]
+    config:
+      dsl: "payload.total > 100"
+
+  - id: kafka-sink
+    type: sink
+    plugin: kafka
+    depends_on: [filter-high]
+    encoder: json
+    ordering: ordered
+    batch: { size: 100, timeout: 1s }
+    config:
+      brokers: [localhost:9092]
+      topic: orders-enriched
+```
+
+### 8.3 场景二：显式 DAG（edges + condition + route）
+
+```yaml
+apiVersion: eventr/v1
+kind: Pipeline
+metadata:
+  name: order-processing
+
+codecs:
+  - name: avro-orders
+    type: avro
+    config: { schema: "...", registry: confluent, registry_url: "..." }
+
+stages:
+  - id: kafka-source
+    type: source
+    plugin: kafka
+    decoder: { ref: avro-orders }
+    config: { brokers: [...], topics: [orders], group_id: order-consumer }
+
+  - id: enrich
+    type: transform
+    plugin: map
+    workers: 8
+    config:
+      dsl: |
+        payload.total = payload.price * payload.quantity
+        metadata.region = payload.region
+
+  - id: splitter
+    type: transform
+    plugin: route
+    config:
+      routes:
+        us: "metadata.region == 'us'"
+        eu: "metadata.region == 'eu'"
+        _default: "true"
+
+  - id: us-sink
+    type: sink
+    plugin: http
+    encoder: json
+    planner: { type: append }
+    batch: { size: 100, timeout: 1s }
+    config: { url: https://us-api.example.com/orders }
+
+  - id: eu-sink
+    type: sink
+    plugin: http
+    config: { url: https://eu-api.example.com/orders }
+
+  - id: dlq-sink
+    type: sink
+    plugin: kafka
+    config: { topic: orders-dlq }
+
+edges:
+  - from: kafka-source
+    to: enrich
+  - from: enrich
+    to: splitter
+  - from: splitter
+    to: us-sink
+    route: us
+  - from: splitter
+    to: eu-sink
+    route: eu
+  - from: splitter
+    to: dlq-sink
+    route: _default
+
+edgeDefaults:
+  buffer:
+    type: memory
+    size: 128
+    strategy: block
+
+dlq:
+  sink: dlq-sink
+  include_current_payload: false
+```
+
+### 8.4 统一 IR
+
+```go
+type TopologyIR struct {
+    Name          string
+    Stages        []StageIR
+    Edges         []EdgeIR
+    Codecs        []CodecIR
+    EdgeDefaults  EdgeConfig
+    DLQ           *DLQConfig
+    Engine        EngineConfig
+    Observability ObservabilityConfig
+}
+
+type StageIR struct {
+    ID         string
+    Type       StageType          // source / transform / sink
+    Plugin     string             // kafka / http / map / filter / route / wasm / ...
+    DependsOn  []string           // 内联无条件边（展开为 EdgeIR）
+    Workers    int                // Transform: 并发 goroutine 数
+    Decoder    *CodecRef          // Source: decoder 引用
+    Encoder    *CodecRef          // Sink: encoder 引用
+    Planner    *PlannerConfig     // Sink: 写入语义
+    Predicate  string             // Transform: 条件应用（Kafka Connect 风格）
+    Batch      *BatchConfig       // Sink: 批量配置
+    Ordering   string             // Sink: ordered | unordered
+    MaxInFlight int               // Sink: 并发 batch write 数
+    Retry      *RetryConfig       // 重试策略
+    DLQ        *DLQConfig         // Stage 级别 DLQ 覆盖
+    Config     map[string]any     // 插件特定配置
+}
+
+type EdgeIR struct {
+    From      string
+    To        string
+    Condition string             // CEL 表达式，空 = 全部
+    Route     string             // route Transform 命名路由
+    Predicate string             // 对 To 端 Transform 的条件应用
+    Buffer    *EdgeBufferConfig  // nil = 使用 edgeDefaults
+    Delivery  *DeliverySpec      // retry/timeout/DLQ
+    Required  *bool              // 默认 true
+}
+
+type CodecIR struct {
+    Name   string
+    Type   string
+    Config map[string]any
+}
+
+type CodecRef struct {
+    Ref    string             // 引用 codecs 顶层声明的 name
+    Type   string             // inline 声明（与 Ref 互斥）
+    Config map[string]any     // Stage 级配置，shallow merge 覆盖 ref 的 config
+}
+
+type EngineConfig struct {
+    MaxWorkersPerPipeline    int
+    MaxInflightPerPipeline   int
+    DrainTimeout             time.Duration
+}
+
+type DLQConfig struct {
+    Sink                  string    // 引用 sink stage ID
+    IncludeCurrentPayload bool
+}
+```
+
+### 8.5 推导模式展开规则
+
+`depends_on` 是无条件边的语法糖，配置加载时展开为 EdgeIR：
+
+| YAML 字段 | 展开结果 |
+|-----------|---------|
+| `depends_on: [a, b]` | 2 条 EdgeIR: `{from: a, to: self}, {from: b, to: self}` |
+| `route: us`（edge 上） | 自动生成 `condition: "metadata['er-route'] == 'us'"` |
+
+### 8.6 配置加载流程
+
+```
+YAML 文件 / K8s CRD / 目录
+        │
+        ▼
+  解析 + env 变量替换（${ENV_VAR}）+ strict unmarshal
+        │
+        ▼
+  depends_on 展开 → 完整 stage+edge
+        │
+        ▼
+  route 字段展开 → condition
+        │
+        ▼
+  Validate TopologyIR：
+    - stage ID 唯一
+    - edge 引用有效
+    - 无孤立节点
+    - 无环
+    - 至少一个 source → sink 通路
+    - codec ref 存在 + ValidateConfig
+    - CEL 表达式编译 + TypeChecker
+    - payload.* 引用但未配 decoder → 报错
+    - ordering: ordered + max_in_flight > 1 → 报错
+        │
+        ▼
+  TopologyIR → 传给 Topology Layer 构建执行图
+```
+
+---
+
+## 9. 组件生态规划
+
+### 9.1 Source
+
+| 优先级 | 组件 | 说明 | at-least-once |
+|--------|------|------|:---:|
+| **P0** | `kafka` | Consumer group、多 partition、SASL | ✅ |
+| **P0** | `http_server` | 路径/方法路由、TLS、限流 | ❌ |
+| **P0** | `cron` | Cron 表达式、时区支持 | ❌ |
+| **P0** | `grpc_server` | proto 反射或通用事件接收 | ❌ |
+| **P1** | `redis` | Streams / List / PubSub | ✅（Streams） |
+| **P1** | `nats` | JetStream 持久订阅 | ✅ |
+| **P1** | `file` | tail 模式、通配符匹配 | ⚠️ |
+| **P2** | `aws_s3` | S3 bucket poll + SQS 通知 | ⚠️ |
+| **P2** | `aws_sqs` | SQS 长轮询 | ✅ |
+| **P2** | `gcp_pubsub` | Pub/Sub push/pull | ✅ |
+| **P2** | `mysql_cdc` | binlog CDC | ✅ |
+
+pull 源（S3/SQS/CDC）实现 `PollingSource` 接口，引擎 wrapper 管定时 poll + 空轮询退避 + pending 队列 + 背压跳过。Source 配置 `poll_retry: { max_attempts, initial_interval, max_interval }`。
+
+### 9.2 Transform
+
+| 优先级 | 组件 | 说明 |
+|--------|------|------|
+| **P0** | `map` | eql DSL 驱动，字段映射/丰富/计算 |
+| **P0** | `filter` | eql DSL 驱动，CEL 谓词过滤 |
+| **P0** | `route` | 条件分支（map 语法糖），`action: move`（v1） |
+| **P0** | `wasm` | 运行 WASM 模块（wazero） |
+| **P1** | `validate` | JSON Schema / Proto 校验 |
+| **P1** | `enrich` | HTTP / gRPC 外部查表丰富 |
+| **P1** | `deduplicate` | 按 key 去重，可配窗口 |
+| **P1** | `split` | 数组展开为多条消息 |
+| **P1** | `throttle` | 速率限制 |
+| **P1** | `promote` | 把 payload 字段提升到 metadata（显式投影） |
+| **P2** | `aggregate` | 时间窗口聚合（count/sum/avg） |
+| **P2** | `redact` | PII 脱敏 |
+| **P2** | `compress` / `decompress` | gzip/snappy/lz4 |
+| **P2** | `log` | 调试输出 |
+
+每个 Transform 可配 `predicate`（CEL 表达式），引擎在调 `Process` 前求值，false 则透传该消息（Kafka Connect 风格条件应用）。
+
+### 9.3 Sink
+
+| 优先级 | 组件 | 说明 |
+|--------|------|------|
+| **P0** | `kafka` | 分区策略、header 透传、压缩 |
+| **P0** | `http` | 重试、TLS、mTLS、连接池 |
+| **P0** | `grpc` | 负载均衡、TLS |
+| **P0** | `drop` | /dev/null，测试用 |
+| **P0** | `log` | 结构化日志输出 |
+| **P1** | `nats` | JetStream publish |
+| **P1** | `redis` | Streams / List / PubSub |
+| **P1** | `file` | 文件写入 + 轮转 |
+| **P1** | `elasticsearch` | 批量索引 |
+| **P2** | `aws_s3` | 对象存储写入 |
+| **P2** | `bigquery` | 流式插入 |
+| **P2** | `websocket_client` | 实时推送 |
+
+### 9.4 Codec
+
+| 优先级 | 组件 | Decode 产出 | 说明 |
+|--------|------|------------|------|
+| **P0** | `json` | `map[string]any` | JSON 解码/编码 |
+| **P0** | `raw` | `[]byte` 透传 | 无解析 |
+| **P1** | `avro` | `map[string]any` | Avro + Schema Registry |
+| **P1** | `protobuf` | `map[string]any`（v1 转换，v2 原生 struct） | Protobuf 解码 |
+| **P1** | `csv` | `map[string]any`（带 header）或 `[]string` | CSV 解码 |
+
+### 9.5 Planner
+
+| 优先级 | 组件 | 说明 |
+|--------|------|------|
+| **P0** | `append` | 仅插入 |
+| **P0** | `upsert` | 按 key 插入或更新 |
+| **P0** | `drop` | 丢弃 |
+| **P1** | `history` | Type 2 SCD |
+| **P1** | `merge` | 合并写入 |
+| **P2** | `bitemporal` | 双时态 |
+| **P2** | `eventtimeupsert` | 按 event time upsert |
+
+### 9.6 WASM 插件
+
+```yaml
+- id: custom-decrypt
+  type: transform
+  plugin: wasm
+  depends_on: [kafka-source]
+  config:
+    module: /opt/plugins/decrypt.wasm
+    function: process          # 必须导出
+    timeout: 100ms
+    memory_limit: 64MB
+    fuel: 0                    # 0 = unlimited（靠 timeout 兜底）
+    plugin_config:             # 可选，传入 WASM init()
+      key: ${DECRYPT_KEY}
+      algorithm: aes-256-gcm
+```
+
+**接口契约：**
+- payload `[]byte` 直传 WASM 线性内存；
+- metadata JSON 序列化整体传入传出；
+- 返回 JSON 数组 `[{payload: "base64", metadata: {...}}, ...]`；
+- 可选导出 `init(config_ptr, config_len)` 接收 plugin_config（无 init 导出则忽略 + warning）；
+- 无 WASI 文件/网络/环境变量；
+- 仅提供 `now()` / `uuid()` / `log()` 三个安全 host function；
+- timeout 默认 100ms，memory_limit 默认 64MB，并发 = workers。
+
+### 9.7 Go 插件加载
+
+**编译时注册**（v1 主路径）：
+
+```go
+// plugins/source/kafka/kafka.go
+package kafka
+import "code.dandanvoice.com/eventr/plugin"
+func init() { plugin.RegisterSource("kafka", &KafkaSourceFactory{}) }
+
+// 用户自定义：fork + import + 重新编译
+// cmd/my-eventr/main.go
+import (
+    _ "code.dandanvoice.com/eventr/plugins/source/all"
+    _ "mycompany.com/my-source"
+)
+```
+
+**gRPC 进程外插件**（v2 可选扩展，对标 HashiCorp go-plugin）。
+
+**不做 Go `plugin` .so 动态加载**。
+
+### 9.8 插件目录约定
+
+```
+plugins/
+├── source/
+│   ├── kafka/
+│   ├── http_server/
+│   └── ...
+├── transform/
+│   ├── map/
+│   ├── filter/
+│   ├── route/
+│   └── wasm/
+├── sink/
+│   ├── kafka/
+│   ├── http/
+│   └── ...
+├── codec/
+│   ├── json/
+│   ├── avro/
+│   └── ...
+└── planner/
+    ├── append/
+    ├── upsert/
+    └── history/
+```
+
+### 9.9 扩展优先级
+
+| 阶段 | 内容 |
+|------|------|
+| **v2.0** | P0 全量 + WASM + Codec（json/raw）+ Planner（append/upsert/drop） |
+| **v2.1** | P1 全量 + Codec（avro/protobuf/csv）+ Planner（history/merge）+ 插件 SDK 文档 |
+| **v2.2** | P2 按需 + gRPC 插件 + per-partition ordering + 社区贡献指南 |
+
+---
+
+## 10. 可观测性设计
+
+### 10.1 指标前缀与标签
+
+前缀：`eventr_`。
+
+**固定低基数标签**（总是启用）：`pipeline`、`stage_id`、`stage_type`、`from`、`to`、`status`、`error_type`、`plugin`、`codec`、`route_name`。
+
+**可选中基数标签**（`extra_labels` 配置启用）：`kafka_topic`、`kafka_partition`、`http_status`。
+
+**禁止高基数标签**（只在 tracing/logging 出现）：`message_id`、`trace_id`。
+
+**安全阀**：`max_label_cardinality: 1000`——单标签超限归 `__other__`。
+
+### 10.2 完整指标清单
+
+| 层级 | 指标名 | 类型 | 标签 |
+|------|--------|------|------|
+| **Pipeline** | `eventr_events_total` | Counter | pipeline, status |
+| | `eventr_event_latency_seconds` | Histogram | pipeline |
+| | `eventr_event_size_bytes` | Histogram | pipeline |
+| | `eventr_inflight_events` | Gauge | pipeline |
+| **Stage** | `eventr_stage_duration_seconds` | Histogram | pipeline, stage_id, stage_type |
+| | `eventr_stage_processed_total` | Counter | pipeline, stage_id, status |
+| | `eventr_stage_errors_total` | Counter | pipeline, stage_id, error_type |
+| | `eventr_stage_retries_total` | Counter | pipeline, stage_id |
+| **Source** | `eventr_source_read_total` | Counter | pipeline, stage_id |
+| | `eventr_source_read_errors_total` | Counter | pipeline, stage_id |
+| | `eventr_source_lag` | Gauge | pipeline, stage_id |
+| | `eventr_source_poll_interval_seconds` | Gauge | pipeline, stage_id |
+| **Transform** | `eventr_transform_batch_size` | Histogram | pipeline, stage_id |
+| | `eventr_transform_fanout_total` | Counter | pipeline, stage_id |
+| **Sink** | `eventr_sink_write_total` | Counter | pipeline, stage_id, status |
+| | `eventr_sink_write_events` | Counter | pipeline, stage_id |
+| | `eventr_sink_batch_size` | Histogram | pipeline, stage_id |
+| | `eventr_sink_in_flight` | Gauge | pipeline, stage_id |
+| | `eventr_sink_flush_total` | Counter | pipeline, stage_id |
+| **Edge** | `eventr_edge_buffer_size` | Gauge | pipeline, from, to |
+| | `eventr_edge_buffer_type` | Gauge | pipeline, from, to, type |
+| | `eventr_edge_dropped_total` | Counter | pipeline, from, to, reason |
+| | `eventr_edge_disk_wal_size_bytes` | Gauge | pipeline, from, to |
+| | `eventr_edge_disk_wal_segments` | Gauge | pipeline, from, to |
+| **Codec** | `eventr_codec_decode_total` | Counter | pipeline, stage_id, codec, status |
+| | `eventr_codec_decode_duration_seconds` | Histogram | pipeline, stage_id, codec |
+| | `eventr_codec_encode_total` | Counter | pipeline, stage_id, codec, status |
+| | `eventr_codec_encode_duration_seconds` | Histogram | pipeline, stage_id, codec |
+| **DLQ** | `eventr_dlq_messages` | Gauge | pipeline, dlq_stage_id |
+| | `eventr_dlq_enqueued_total` | Counter | pipeline, dlq_stage_id, error_type |
+| | `eventr_dlq_replayed_total` | Counter | pipeline, dlq_stage_id |
+| **Route** | `eventr_route_matched_total` | Counter | pipeline, stage_id, route_name |
+| | `eventr_route_default_total` | Counter | pipeline, stage_id |
+| **DSL** | `eventr_dsl_eval_total` | Counter | pipeline, stage_id, status |
+| | `eventr_dsl_eval_duration_seconds` | Histogram | pipeline, stage_id |
+| | `eventr_dsl_type_mismatch_total` | Counter | pipeline, stage_id |
+| **Engine** | `eventr_engine_goroutines` | Gauge | pipeline |
+| | `eventr_engine_pipelines` | Gauge | (无 label) |
+| | `eventr_pipeline_uptime_seconds` | Gauge | pipeline |
+| | `eventr_pipeline_status` | Gauge | pipeline, status |
+| | `eventr_hot_reload_total` | Counter | pipeline, status |
+
+### 10.3 暴露方式
+
+```yaml
+observability:
+  metrics:
+    enabled: true
+    port: 9090
+    path: /metrics
+    format: prometheus       # prometheus | otlp | json
+    extra_labels: [kafka_topic, route_name]
+    max_label_cardinality: 1000
+    otlp:
+      endpoint: otel-collector:4317
+      interval: 15s
+```
+
+### 10.4 追踪（Tracing）
+
+每层创建 span — 完整捕获事件经过的每个 stage 和 edge，包括 condition 匹配结果：
+
+```
+Pipeline Span (eventr.pipeline.order-processing)
+├── Source Span (eventr.source.kafka-source)
+│   ├── Transform Span (eventr.transform.enrich)
+│   │   ├── Edge Span (eventr.edge.enrich→us-sink)
+│   │   │   └── Sink Span (eventr.sink.us-sink)
+│   │   └── Edge Span (eventr.edge.enrich→eu-sink)
+```
+
+trace_id / message_id / topic / partition 进 span attributes（高基数信息只在 tracing 出现）。
+
+### 10.5 日志（Logging）
+
+```json
+{
+  "level": "info",
+  "msg": "message processed",
+  "pipeline": "order-processing",
+  "stage_id": "enrich",
+  "stage_type": "transform",
+  "message_id": "msg_01jv4x...",
+  "trace_id": "abc123",
+  "duration_ms": 1.2,
+  "metadata": { "region": "us" }
+}
+```
+
+| 功能 | 支持 |
+|------|:---:|
+| 日志格式 | json / text / loki |
+| 日志级别动态调整 | ✅ `PUT /debug/loglevel` |
+| stage 独立级别 | ✅ stage 级覆盖 |
+| 敏感字段脱敏 | ✅ `redact_fields` 配置 |
+
+### 10.6 健康检查
+
+```yaml
+observability:
+  health:
+    port: 8080
+    endpoints:
+      liveness: /live
+      readiness: /ready
+```
+
+- **`/live`**：查进程活着（HTTP server + engine supervisor）→ 200/503。不查 Stage。
+- **`/ready`**：调所有 Pipeline 所有 Stage 的 `HealthCheck`，全 healthy→200，任一 unhealthy→503 + body 列出 `pipeline/stage_id/message`。支持 `?pipeline={name}`。
+- **正在重试/drain 中算 unhealthy**。
+- **Transform 默认 healthy**（无外部依赖）。
+- **admin/metrics 端点独立 mux**，不受 readiness 影响。
+
+### 10.7 通知（Notifications）
+
+```yaml
+observability:
+  notifications:
+    enabled: true
+    rules:
+      - name: critical-alerts
+        events: [backpressure_paused, sink_fatal, dlq_growing]
+        cooldown: 5m
+        channels: [pagerduty, slack-critical]
+    channels:
+      - name: pagerduty
+        type: pagerduty
+        config: { routing_key: ${PAGERDUTY_KEY} }
+    template_engine: go_template
+```
+
+**v2 新增事件类型：**
+
+| 事件 | 触发条件 |
+|------|---------|
+| `backpressure_paused` | 背压状态进入 PAUSED |
+| `sink_fatal` | Sink 连续失败不可恢复 |
+| `dlq_growing` | DLQ 消息数超过阈值 |
+| `edge_dropped` | Edge buffer 满导致丢弃 |
+| `source_lag_high` | Source 消费延迟超过阈值 |
+| `pipeline_halted` | 管道因配置错误或致命异常停止 |
+
+---
+
+## 11. 部署架构
+
+### 11.1 双形态总览
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                     Core Engine                          │
+│         (Source → Transform → Sink DAG)                 │
+│         同样的代码，同一种行为                             │
+└──────────────┬────────────────────┬─────────────────────┘
+               │                    │
+      ┌─────────▼──────┐    ┌───────▼──────────────┐
+      │  Standalone     │    │  K8s Operator         │
+      │  • 单二进制      │    │  • 同二进制 + CRD     │
+      │  • YAML 配置     │    │  • Pipeline CR 驱动   │
+      │  • 多 Pipeline   │    │  • 自动重启/扩缩      │
+      │  • 信号管理      │    │  • 调 HTTP API 重载   │
+      └────────────────┴────┴───────────────────────┘
+```
+
+### 11.2 单二进制模式
+
+```bash
+# 基础启动（单 Pipeline）
+eventr run --config pipeline.yaml
+
+# 目录模式（多 Pipeline，每个文件一个 pipeline）
+eventr run --config-dir /etc/eventr/pipelines/
+
+# 环境变量替换
+eventr run --config pipeline.yaml
+# 配置文件内 ${KAFKA_BROKERS} 自动替换为环境变量值
+```
+
+#### 文件结构
+
+```
+/opt/eventr/
+├── bin/eventr             # 主二进制（含所有内置 Go 插件）
+├── etc/
+│   ├── config.yaml        # 引擎全局配置
+│   └── pipelines/         # 管道定义（多 Pipeline）
+├── plugins/
+│   └── *.wasm             # WASM 插件（动态加载）
+└── data/
+    ├── dlq/               # DLQ 持久化
+    └── buffers/           # edge disk buffer WAL
+```
+
+### 11.3 K8s Operator
+
+#### CRD
+
+```yaml
+apiVersion: eventr/v1
+kind: Pipeline
+metadata:
+  name: order-processing
+spec:
+  codecs: [...]
+  stages: [...]
+  edges: [...]
+  edgeDefaults: ...
+  dlq: ...
+  engine:
+    max_workers: 16
+    max_inflight: 10000
+status:
+  phase: Running
+  conditions:
+    - type: Ready
+      status: "True"
+  stageStatus:
+    kafka-source: { phase: Running }
+    us-sink: { phase: Degraded, message: "HTTP 503" }
+```
+
+#### Operator 架构
+
+```
+Operator Pod
+┌──────────┐     ┌──────────────────┐
+│Controller│────▶│  Reconciler      │
+│(watch    │     │  → ConfigMap     │
+│ CRDs)    │     │  → Deployment    │
+└──────────┘     │  → Service       │
+                 │  → Status Update │
+                 │  → POST /admin/  │
+                 │     reload/{name}│
+                 └────────┬─────────┘
+                          │
+                 ┌────────▼─────────┐
+                 │  Pipeline Pod     │
+                 │  (ConfigMap mount │
+                 │   → 引擎启动)     │
+                 └──────────────────┘
+```
+
+Operator 通过调 Pod 的 `POST /admin/reload/{name}` HTTP API 触发热加载（无 ConfigMap 传播延迟）。
+
+v1 默认**多 Pipeline 聚合模式**（单 Pod 多 Pipeline，资源高效）。独立 Deployment 隔离模式需显式开启。
+
+#### 自动扩缩
+
+```yaml
+spec:
+  scaling:
+    minReplicas: 1
+    maxReplicas: 10
+    metrics:
+      - type: cpu
+        targetUtilization: 70
+      - type: event_lag
+        targetValue: 1000
+```
+
+### 11.4 CLI 工具
+
+```
+eventr run        # 运行引擎
+eventr validate   # 仅校验配置（CI 用）
+eventr test       # 用 fixture 数据测试管道（CI 用）
+eventr doc        # 生成管道可视化（DOT 格式 → Graphviz）
+```
+
+v2 增加 `eventr eql`（CEL/eql REPL）、`eventr lint`（配置 lint）。
+
+---
+
+## 12. 开发路线图
+
+### 阶段 1：核心引擎（v2.0-alpha）
+
+- [ ] 项目骨架（module、目录结构、Makefile）
+- [ ] Message 模型 + Stage/Edge/Codec/Planner 接口定义
+- [ ] Topology IR + YAML 解析 + depends_on 展开 + 校验
+- [ ] Engine 核心：fanOut/fanIn、Edge Buffer（memory）、refCount Ack、COW、背压传播
+- [ ] eql DSL：CEL 集成（cel-go）+ 赋值扩展 + 函数注册 + 编译期检查
+- [ ] Codec 体系：json/raw + 顶层 codecs 配置 + 惰性 ParsedData
+- [ ] 3 个 Source（kafka/http_server/cron）+ 3 个 Sink（kafka/http/drop）+ 4 个 Transform（map/filter/route/wasm）
+- [ ] Planner：append/upsert/drop
+- [ ] 多 Pipeline 运行时 + 档②隔离
+- [ ] Metrics（eventr_ 前缀）+ Tracing（OTLP）+ Health endpoints
+- [ ] CLI：run + validate
+
+### 阶段 2：生产就绪（v2.0）
+
+- [ ] Edge disk buffer + overflow
+- [ ] 其余 P0 组件（grpc_server source、grpc/log sink）
+- [ ] Sink max_in_flight + ordering
+- [ ] retry + DLQ（确定性 vs 瞬时错误分类 + fallback 链）
+- [ ] 配置热加载（单 Pipeline graceful restart + admin API）
+- [ ] Notifications
+- [ ] 性能基准测试 + 压力测试
+
+### 阶段 3：生态扩展（v2.1）
+
+- [ ] K8s Operator（Pipeline CRD + Controller + Reconciler + HTTP API 重载）
+- [ ] P1 组件全量（nats/redis/file source/sink；validate/enrich/dedup/split/throttle/promote transform）
+- [ ] Codec P1（avro/protobuf/csv）+ Planner P1（history/merge）
+- [ ] gRPC 进程外插件
+- [ ] 插件 SDK 文档 + 示例
+
+### 阶段 4：高级特性（v2.2+）
+
+- [ ] P2 组件按需（aws_s3/sqs、gcp_pubsub、mysql_cdc、elasticsearch、bigquery）
+- [ ] per-partition ordering（buffer.key 分区缓冲）
+- [ ] VRL 风格 fallibility 类型系统（`!`/`??`/`, err`）
+- [ ] route `action: copy`（fan-out 多 route）
+- [ ] Decision + Task 步骤（Envelope 启发）
+- [ ] 跨 Pipeline 事件路由（经由中间总线）
+- [ ] 社区贡献指南 + 管道可视化 UI
+- [ ] Schema Registry 集成
+
+---
+
+> 本文档基于对 v1 代码库的全面分析和 10 个竞品项目（Benthos/Redpanda Connect、Vector、Kafka Connect、Knative Eventing、Argo Events、Fluentd、Flume、OpenTelemetry Collector、CloudEvents CESQL、Cloudera Envelope）的深入调研，经 40 项架构决策澄清后编写。完整调研详见 `competitor-research.md`，设计评审详见 `design-review.md`。
