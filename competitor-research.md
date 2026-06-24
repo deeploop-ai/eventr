@@ -1,5 +1,7 @@
 # Event Router / Stream Processing Projects — Comparison with `eventr`
 
+> **注意（2025-06-24）：** 文末部分「建议」已被 `eventr-design.md` v2.0-draft 吸收或推翻（`depends_on`、Codec 体系、不采纳 Planner 等）。**以 `eventr-design.md` 为准**；下文保留调研原始脉络。
+
 Research conducted against the eventr design (`eventrouter-v2-design.md`) for a
 Go-based DAG event router with Source/Transform/Sink, per-edge buffers, a custom
 DSL ("eql"), and a Kubernetes operator.
@@ -706,7 +708,9 @@ steps {
 }
 ```
 
-Each step is a **named block** containing optional `input` / `deriver` / `planner` / `partitioner` / `output` sub-blocks. Edges are expressed as `dependencies = [a, b]` **inside the child step**, not as a separate `edges:` section. This is the same pattern Vector uses (`inputs = [...]`) and is **markedly friendlier than eventr's explicit `edges:` list** for the common case of unconditional fan-in / linear chains. eventr's explicit edges remain valuable when per-edge conditions/buffers are needed — but the common case pays verbosity it doesn't need.
+Each step is a **named block** containing optional `input` / `deriver` / `planner` / `partitioner` / `output` sub-blocks. Edges are expressed as `dependencies = [a, b]` **inside the child step**, not as a separate `edges:` section — the same pattern Vector uses (`inputs = [...]`).
+
+> **eventr v2.0（2025-06）：** 已采纳 Envelope/Vector 的内联边思路，用 `depends_on`（序列或映射）替代独立 `edges:` 段；per-edge `buffer`/`delivery`/`route` 写在 `depends_on` 对象值内。详见 `eventr-design.md` §8.1.3。**Planner 不采纳**；写入语义由各 Sink `config` 自管。
 
 ### 9.3 The Planner concept — decoupling write semantics from output transport
 
@@ -745,6 +749,8 @@ eventr's current design has **no equivalent** — Sink handles both transport (K
 
 **Recommendation:** eventr should introduce a **Planner layer** between Transform and Sink (or as a Sink-decorator). P0 planners: `append`, `upsert`, `drop`. P1: `history` (SCD2), `merge`. P2: `bitemporal`. This is the single highest-value architectural idea to steal from Envelope for any ETL-oriented user.
 
+> **eventr v2.0 决策：不采纳 Planner。** 写入语义由各 Sink 插件 `config` 自行定义；复杂 ETL（SCD2 等）在专用 Sink 或 Transform 内实现。见 `eventr-design.md` §2.2、§4.5。
+
 ### 9.4 The Translator concept — decoupling byte parsing from input transport
 
 Symmetric to Planner on the input side. A **Translator** sits inside an input step and converts raw bytes → structured rows:
@@ -774,6 +780,8 @@ input {
 eventr's current Source conflates transport + parsing — a Kafka source must "know" whether payloads are JSON/Avro/CSV. The Translator split lets the **same `kafka` source plugin** produce parsed records by pairing it with any translator. This reduces the connector matrix: instead of `kafka_json`, `kafka_avro`, `http_json`, `http_csv` (combinatorial explosion), you have `kafka` + `http` transports × `avro` + `json` + `csv` + `protobuf` translators.
 
 **Recommendation:** eventr should add an optional `translator` sub-block on Source (or a `decode` Transform that's sugar for the same). P0 translators: `json`, `raw`. P1: `avro`, `protobuf`, `csv`.
+
+> **eventr v2.0 决策：已采纳为 Codec 体系** — Source `decoder` / Sink `encoder` + 顶层 `codecs:` 共享配置。见 `eventr-design.md` §5。
 
 ### 9.5 Control-flow steps: Loop, Decision, Task, Repetition
 
@@ -856,11 +864,10 @@ eventr has none of these. The most transferable are **decision** (runtime sub-gr
    collapse "router + fan-out" into one Node with `action: move|copy` and
    `default_pipelines`.
 5. **`dependencies = [...]` as sugar for unconditional edges** (projects 9 + Vector) —
-   keep explicit `edges:` for per-edge condition/buffer, but allow `depends_on: [a, b]`
-   on a stage as shorthand for the common linear/fan-in case. Best of Envelope's
-   friendliness and eventr's expressiveness.
+   **已采纳：** eventr 用 `depends_on`（序列/映射）为唯一边语法，per-edge 属性内联在对象值内；独立 `edges:` 已 deprecated。见 `eventr-design.md` §8.1.3。
 6. **HOCON ergonomics** (project 9) — native env-var overlay + `${substitution}`
    in config; ideally offer HOCON as an alternative format to YAML.
+   **已采纳：** YAML + HOCON 双格式。见 `eventr-design.md` §8.2。
 7. **Argo's `conditions` + `conditionsReset` over dependencies** (project 2)
    — a "join gate" at DAG joins with `&&` / `||` over upstream Sources and
    time-based reset so stale half-matches don't fire.

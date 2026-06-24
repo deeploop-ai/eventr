@@ -1,5 +1,7 @@
 # eventr v2 设计评审报告
 
+> **注意（2025-06-24）：** 部分建议已被 `eventr-design.md` v2.0-draft 吸收或推翻（如独立 `edges:`、`Planner` 层、`StageIR.predicate` 等）。以 `eventr-design.md` 为准；下文保留历史评审脉络。
+
 > 评审对象：`eventrouter-v2-design.md`（v2.0-draft，2025-06-24）
 > 评审方法：文档逐节细读 + 6 大主流开源竞品深度对比
 > 竞品：Benthos/Redpanda Connect、Vector、Kafka Connect、Knative Eventing、Argo Events、Fluentd、Flume、OpenTelemetry Collector、CloudEvents CESQL、Cloudera Envelope
