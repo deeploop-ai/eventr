@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"sync"
 
 	"github.com/deeploop-ai/eventr/internal/config"
@@ -12,11 +13,15 @@ import (
 )
 
 type Engine struct {
-	reg       *registry.Registry
-	pipelines map[string]*Pipeline
-	metrics   *observability.Metrics
-	obs       *observability.Server
-	mu        sync.Mutex
+	reg         *registry.Registry
+	pipelines   map[string]*Pipeline
+	configPaths map[string]string
+	reloading   map[string]bool
+	reloadTasks map[string]*ReloadTask
+	reloadMu    sync.Mutex
+	metrics     *observability.Metrics
+	obs         *observability.Server
+	mu          sync.Mutex
 }
 
 func New(reg *registry.Registry) *Engine {
@@ -26,6 +31,7 @@ func New(reg *registry.Registry) *Engine {
 	return &Engine{
 		reg:       reg,
 		pipelines: make(map[string]*Pipeline),
+		reloading: make(map[string]bool),
 		metrics:   observability.NewMetrics(nil),
 	}
 }
@@ -57,7 +63,9 @@ func (e *Engine) StartObservability(ctx context.Context, cfg config.Observabilit
 		pipes = append(pipes, p)
 	}
 	checker := observability.NewChecker(pipes...)
-	e.obs = observability.NewServer(cfg, e.metrics, checker)
+	adminMux := http.NewServeMux()
+	NewAdminHandler(e).Register(adminMux)
+	e.obs = observability.NewServer(cfg, e.metrics, checker, adminMux)
 	return e.obs.Start(ctx)
 }
 
@@ -100,6 +108,13 @@ func (e *Engine) Stop(ctx context.Context) error {
 		}
 	}
 	return first
+}
+
+func (e *Engine) Pipeline(name string) (*Pipeline, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	p, ok := e.pipelines[name]
+	return p, ok
 }
 
 func (e *Engine) PipelineCount() int {

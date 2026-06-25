@@ -40,7 +40,7 @@ func (t *Transform) Process(ctx context.Context, batch []*message.Message) ([]*m
 		cp := msg.ShallowCopy()
 		payload, input := payloadMap(cp)
 		evalCtx := &eql.EvalContext{
-			Msg:     msgAdapter{cp},
+			Msg:     eql.NewMsgAdapter(cp),
 			Input:   input,
 			Payload: payload,
 			Meta:    cp.Metadata,
@@ -81,8 +81,3 @@ func payloadMap(msg *message.Message) (map[string]any, map[string]any) {
 	return payload, input
 }
 
-type msgAdapter struct{ *message.Message }
-
-func (m msgAdapter) EnsureWritable()              { m.Message.EnsureWritable() }
-func (m msgAdapter) SetParsedData(v any)          { m.Message.SetParsedData(v) }
-func (m msgAdapter) Metadata() map[string]any     { return m.Message.Metadata }

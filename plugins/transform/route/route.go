@@ -101,7 +101,7 @@ func (t *Transform) Process(ctx context.Context, batch []*message.Message) ([]*m
 			_ = json.Unmarshal(cp.Payload, &payload)
 		}
 		evalCtx := &eql.EvalContext{
-			Msg:     msgAdapter{cp},
+			Msg:     eql.NewMsgAdapter(cp),
 			Input:   payload,
 			Payload: payload,
 			Meta:    cp.Metadata,
@@ -130,8 +130,3 @@ func (t *Transform) Process(ctx context.Context, batch []*message.Message) ([]*m
 	return out, nil
 }
 
-type msgAdapter struct{ *message.Message }
-
-func (m msgAdapter) EnsureWritable()          { m.Message.EnsureWritable() }
-func (m msgAdapter) SetParsedData(v any)      { m.Message.SetParsedData(v) }
-func (m msgAdapter) Metadata() map[string]any { return m.Message.Metadata }

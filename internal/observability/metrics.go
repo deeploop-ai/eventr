@@ -23,7 +23,7 @@ type Metrics struct {
 
 func NewMetrics(reg prometheus.Registerer) *Metrics {
 	if reg == nil {
-		reg = prometheus.DefaultRegisterer
+		reg = prometheus.NewRegistry()
 	}
 	m := &Metrics{reg: reg}
 
@@ -86,6 +86,13 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		m.EnginePipelines,
 	)
 	return m
+}
+
+func (m *Metrics) Gatherer() prometheus.Gatherer {
+	if g, ok := m.reg.(prometheus.Gatherer); ok {
+		return g
+	}
+	return prometheus.DefaultGatherer
 }
 
 func (m *Metrics) SetPipelineCount(n int) {

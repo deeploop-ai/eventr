@@ -106,32 +106,15 @@ func (g *runtimeGraph) evalCondition(prg *eql.Program, msg *message.Message) (bo
 	if prg == nil {
 		return true, nil
 	}
-	payload := extractPayload(msg)
+	payload := eql.PayloadMap(msg)
 	ctx := &eql.EvalContext{
-		Msg:     msgAdapter{msg},
+		Msg:     eql.NewMsgAdapter(msg),
 		Input:   payload,
 		Payload: payload,
 		Meta:    msg.Metadata,
 	}
 	return prg.EvalFilter(ctx)
 }
-
-func extractPayload(msg *message.Message) map[string]any {
-	if msg.ParsedData() != nil {
-		if m, ok := msg.ParsedData().(map[string]any); ok {
-			return m
-		}
-	}
-	return map[string]any{}
-}
-
-type msgAdapter struct{ *message.Message }
-
-func (m msgAdapter) EnsureWritable() { m.Message.EnsureWritable() }
-func (m msgAdapter) SetParsedData(v any) {
-	m.Message.SetParsedData(v)
-}
-func (m msgAdapter) Metadata() map[string]any { return m.Message.Metadata }
 
 func (g *runtimeGraph) allEdgeInbounds() []*buffer.EdgeInbound {
 	out := make([]*buffer.EdgeInbound, 0, len(g.edgeInbounds))

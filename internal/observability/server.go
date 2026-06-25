@@ -24,7 +24,7 @@ type Server struct {
 	mu         sync.Mutex
 }
 
-func NewServer(cfg config.ObservabilityConfig, metrics *Metrics, checker *Checker) *Server {
+func NewServer(cfg config.ObservabilityConfig, metrics *Metrics, checker *Checker, admin http.Handler) *Server {
 	config.ApplyObservabilityDefaults(&cfg)
 	s := &Server{
 		cfg:     cfg,
@@ -35,11 +35,15 @@ func NewServer(cfg config.ObservabilityConfig, metrics *Metrics, checker *Checke
 	s.healthMux = http.NewServeMux()
 
 	if cfg.Metrics.Enabled {
-		s.metricsMux.Handle(cfg.Metrics.Path, promhttp.Handler())
+		s.metricsMux.Handle(cfg.Metrics.Path, promhttp.HandlerFor(s.metrics.Gatherer(), promhttp.HandlerOpts{}))
 	}
 	s.healthMux.HandleFunc(cfg.Health.Liveness, s.handleLiveness)
 	s.healthMux.HandleFunc(cfg.Health.Readiness, s.handleReadiness)
 	s.healthMux.HandleFunc("/debug/loglevel", s.handleLogLevel)
+	if admin != nil {
+		s.metricsMux.Handle("/admin/", admin)
+		s.healthMux.Handle("/admin/", admin)
+	}
 
 	return s
 }
@@ -72,6 +76,12 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func (s *Server) SetPipelines(pipes ...PipelineHealth) {
+	if s.checker != nil {
+		s.checker.SetPipelines(pipes...)
+	}
 }
 
 func (s *Server) Stop(ctx context.Context) error {

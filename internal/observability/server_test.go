@@ -73,7 +73,7 @@ func TestServerLivenessAndReadiness(t *testing.T) {
 		Health:  config.HealthConfig{Enabled: true},
 	}
 	config.ApplyObservabilityDefaults(&cfg)
-	srv := observability.NewServer(cfg, metrics, checker)
+	srv := observability.NewServer(cfg, metrics, checker, nil)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc(cfg.Health.Liveness, func(w http.ResponseWriter, r *http.Request) {

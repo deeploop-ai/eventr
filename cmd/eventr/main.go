@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/deeploop-ai/eventr/internal/engine"
 	"github.com/deeploop-ai/eventr/internal/observability"
 	"github.com/deeploop-ai/eventr/internal/registry"
+	"github.com/deeploop-ai/eventr/internal/testrunner"
 	"github.com/deeploop-ai/eventr/internal/topology"
 	_ "github.com/deeploop-ai/eventr/plugins/all"
 )
@@ -28,6 +30,8 @@ func main() {
 		runCmd(os.Args[2:])
 	case "validate":
 		validateCmd(os.Args[2:])
+	case "test":
+		testCmd(os.Args[2:])
 	default:
 		usage()
 		os.Exit(1)
@@ -35,7 +39,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, "Usage: eventr <run|validate> [flags]\n")
+	fmt.Fprintf(os.Stderr, "Usage: eventr <run|validate|test> [flags]\n")
 }
 
 func runCmd(args []string) {
@@ -45,7 +49,7 @@ func runCmd(args []string) {
 	format := fs.String("format", "", "config format (yaml|hocon)")
 	_ = fs.Parse(args)
 
-	cfgs, err := loadConfigs(*configPath, *configDir, *format)
+	cfgs, paths, err := loadConfigsWithPaths(*configPath, *configDir, *format)
 	if err != nil {
 		fatal(err)
 	}
@@ -54,7 +58,7 @@ func runCmd(args []string) {
 	defer cancel()
 
 	eng := engine.New(registry.Default)
-	for _, cfg := range cfgs {
+	for i, cfg := range cfgs {
 		ir, err := topology.FromConfig(cfg)
 		if err != nil {
 			fatal(err)
@@ -64,6 +68,9 @@ func runCmd(args []string) {
 		}
 		if err := eng.Load(ctx, ir); err != nil {
 			fatal(err)
+		}
+		if paths[i] != "" {
+			eng.SetConfigPath(ir.Name, paths[i])
 		}
 		fmt.Printf("loaded pipeline %q (%d stages, %d edges)\n", ir.Name, len(ir.Stages), len(ir.Edges))
 	}
@@ -84,6 +91,24 @@ func runCmd(args []string) {
 		fatal(err)
 	}
 	fmt.Println("eventr running; press Ctrl+C to stop")
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGHUP)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-sigCh:
+				if _, err := eng.BeginReloadAll(context.Background()); err != nil {
+					slog.Error("SIGHUP reload failed", "error", err)
+				} else {
+					slog.Info("reload all triggered by SIGHUP")
+				}
+			}
+		}
+	}()
+
 	<-ctx.Done()
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer stopCancel()
@@ -98,7 +123,7 @@ func validateCmd(args []string) {
 	format := fs.String("format", "", "config format (yaml|hocon)")
 	_ = fs.Parse(args)
 
-	cfgs, err := loadConfigs(*configPath, *configDir, *format)
+	cfgs, _, err := loadConfigsWithPaths(*configPath, *configDir, *format)
 	if err != nil {
 		fatal(err)
 	}
@@ -114,29 +139,90 @@ func validateCmd(args []string) {
 	}
 }
 
-func loadConfigs(path, dir, format string) ([]*config.PipelineConfig, error) {
+func testCmd(args []string) {
+	fs := flag.NewFlagSet("test", flag.ExitOnError)
+	testPath := fs.String("config", "", "test suite YAML file")
+	testDir := fs.String("dir", "", "directory of test suite YAML files")
+	_ = fs.Parse(args)
+
+	var files []string
+	switch {
+	case *testPath != "":
+		files = []string{*testPath}
+	case *testDir != "":
+		entries, err := os.ReadDir(*testDir)
+		if err != nil {
+			fatal(err)
+		}
+		for _, ent := range entries {
+			if ent.IsDir() {
+				continue
+			}
+			ext := filepath.Ext(ent.Name())
+			if ext == ".yaml" || ext == ".yml" {
+				files = append(files, filepath.Join(*testDir, ent.Name()))
+			}
+		}
+	default:
+		fatal(fmt.Errorf("either --config or --dir is required"))
+	}
+	if len(files) == 0 {
+		fatal(fmt.Errorf("no test files found"))
+	}
+
+	var all []testrunner.Result
+	for _, f := range files {
+		results, err := testrunner.RunFile(f, registry.Default)
+		if err != nil {
+			fatal(err)
+		}
+		all = append(all, results...)
+	}
+	fmt.Print(testrunner.FormatResults(all))
+	if !testrunner.AllPassed(all) {
+		os.Exit(1)
+	}
+}
+
+func loadConfigsWithPaths(path, dir, format string) ([]*config.PipelineConfig, []string, error) {
 	switch {
 	case path != "":
 		if format != "" {
 			f, err := config.DetectFormat(path, format)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
+			var cfg *config.PipelineConfig
+			var err2 error
 			switch f {
 			case config.FormatYAML:
-				cfg, err := config.LoadYAML(path)
-				return []*config.PipelineConfig{cfg}, err
+				cfg, err2 = config.LoadYAML(path)
 			case config.FormatHOCON:
-				cfg, err := config.LoadHOCON(path)
-				return []*config.PipelineConfig{cfg}, err
+				cfg, err2 = config.LoadHOCON(path)
 			}
+			return []*config.PipelineConfig{cfg}, []string{path}, err2
 		}
 		cfg, err := config.LoadFile(path)
-		return []*config.PipelineConfig{cfg}, err
+		return []*config.PipelineConfig{cfg}, []string{path}, err
 	case dir != "":
-		return config.LoadDir(dir)
+		cfgs, err := config.LoadDir(dir)
+		if err != nil {
+			return nil, nil, err
+		}
+		paths := make([]string, len(cfgs))
+		for i, cfg := range cfgs {
+			name := config.PipelineName(cfg)
+			for _, ext := range []string{".yaml", ".yml", ".conf", ".hocon"} {
+				candidate := filepath.Join(dir, name+ext)
+				if _, err := os.Stat(candidate); err == nil {
+					paths[i] = candidate
+					break
+				}
+			}
+		}
+		return cfgs, paths, nil
 	default:
-		return nil, fmt.Errorf("either --config or --config-dir is required")
+		return nil, nil, fmt.Errorf("either --config or --config-dir is required")
 	}
 }
 

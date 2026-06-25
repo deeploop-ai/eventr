@@ -1,4 +1,4 @@
-.PHONY: build test validate tidy
+.PHONY: build test validate tidy pipeline-test
 
 BINARY := bin/eventr
 
@@ -13,3 +13,6 @@ tidy:
 
 validate: build
 	./$(BINARY) validate --config testdata/pipelines/linear.yaml
+
+pipeline-test: build
+	./$(BINARY) test --dir testdata/tests

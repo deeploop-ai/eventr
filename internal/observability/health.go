@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/deeploop-ai/eventr/internal/stage"
@@ -32,6 +33,7 @@ type PipelineHealth interface {
 
 // Checker aggregates pipeline health for /ready.
 type Checker struct {
+	mu        sync.RWMutex
 	pipelines []PipelineHealth
 }
 
@@ -39,9 +41,19 @@ func NewChecker(pipelines ...PipelineHealth) *Checker {
 	return &Checker{pipelines: pipelines}
 }
 
+func (c *Checker) SetPipelines(pipelines ...PipelineHealth) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.pipelines = pipelines
+}
+
 func (c *Checker) Readiness(ctx context.Context, pipelineFilter string) HealthReport {
+	c.mu.RLock()
+	pipelines := c.pipelines
+	c.mu.RUnlock()
+
 	report := HealthReport{Healthy: true}
-	for _, p := range c.pipelines {
+	for _, p := range pipelines {
 		if pipelineFilter != "" && p.Name() != pipelineFilter {
 			continue
 		}

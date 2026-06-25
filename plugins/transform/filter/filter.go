@@ -46,7 +46,7 @@ func (t *Transform) Process(ctx context.Context, batch []*message.Message) ([]*m
 			_ = json.Unmarshal(msg.Payload, &payload)
 		}
 		ok, err := t.prg.EvalFilter(&eql.EvalContext{
-			Msg:     msgAdapter{msg},
+			Msg:     eql.NewMsgAdapter(msg),
 			Input:   payload,
 			Payload: payload,
 			Meta:    msg.Metadata,
@@ -61,8 +61,3 @@ func (t *Transform) Process(ctx context.Context, batch []*message.Message) ([]*m
 	return out, nil
 }
 
-type msgAdapter struct{ *message.Message }
-
-func (m msgAdapter) EnsureWritable()          { m.Message.EnsureWritable() }
-func (m msgAdapter) SetParsedData(v any)      { m.Message.SetParsedData(v) }
-func (m msgAdapter) Metadata() map[string]any { return m.Message.Metadata }

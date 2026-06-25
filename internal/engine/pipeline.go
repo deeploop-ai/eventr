@@ -737,6 +737,10 @@ func (p *Pipeline) Name() string {
 	return p.ir.Name
 }
 
+func (p *Pipeline) Inflight() int32 {
+	return p.inflight.Load()
+}
+
 func (p *Pipeline) CheckStages(ctx context.Context) []observability.StageHealth {
 	out := make([]observability.StageHealth, 0, len(p.stages))
 	for id, st := range p.stages {
