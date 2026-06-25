@@ -17,6 +17,7 @@ type runtimeNode struct {
 	outBuffer  int
 	workers    int
 	conditions map[string]*eql.Program
+	predicate  *eql.Program // pre-compiled transform predicate (Kafka Connect style)
 }
 
 type runtimeGraph struct {
@@ -43,6 +44,14 @@ func buildRuntimeGraph(ir *topology.TopologyIR) (*runtimeGraph, error) {
 			outBuffer: buf,
 			workers:   workers,
 		}
+		// Pre-compile transform predicate (Kafka Connect style conditional application)
+		if st.Predicate != "" && st.Kind == topology.KindTransform {
+			prg, err := eql.CompileFilter(st.Predicate)
+			if err != nil {
+				return nil, fmt.Errorf("stage %q predicate: %w", st.ID, err)
+			}
+			node.predicate = prg
+		}
 		g.nodes[st.ID] = node
 	}
 	for _, edge := range ir.Edges {
@@ -52,7 +61,6 @@ func buildRuntimeGraph(ir *topology.TopologyIR) (*runtimeGraph, error) {
 			if err != nil {
 				return nil, fmt.Errorf("edge %s->%s condition: %w", edge.From, edge.To, err)
 			}
-			g.nodes[edge.From].conditions = g.nodes[edge.From].conditions
 			if g.nodes[edge.From].conditions == nil {
 				g.nodes[edge.From].conditions = make(map[string]*eql.Program)
 			}
@@ -62,11 +70,21 @@ func buildRuntimeGraph(ir *topology.TopologyIR) (*runtimeGraph, error) {
 	return g, nil
 }
 
-func (g *runtimeGraph) evalCondition(cond string, msg *message.Message) (bool, error) {
-	prg, err := eql.CompileCondition(cond)
-	if err != nil {
-		return false, err
+func (g *runtimeGraph) evalCondition(prg *eql.Program, msg *message.Message) (bool, error) {
+	if prg == nil {
+		return true, nil
 	}
+	payload := extractPayload(msg)
+	ctx := &eql.EvalContext{
+		Msg:     msgAdapter{msg},
+		Input:   payload,
+		Payload: payload,
+		Meta:    msg.Metadata,
+	}
+	return prg.EvalFilter(ctx)
+}
+
+func extractPayload(msg *message.Message) map[string]any {
 	payload := map[string]any{}
 	if msg.ParsedData() != nil {
 		if m, ok := msg.ParsedData().(map[string]any); ok {
@@ -75,13 +93,7 @@ func (g *runtimeGraph) evalCondition(cond string, msg *message.Message) (bool, e
 	} else if len(msg.Payload) > 0 {
 		_ = json.Unmarshal(msg.Payload, &payload)
 	}
-	ctx := &eql.EvalContext{
-		Msg:     msgAdapter{msg},
-		Input:   payload,
-		Payload: payload,
-		Meta:    msg.Metadata,
-	}
-	return prg.EvalFilter(ctx)
+	return payload
 }
 
 type msgAdapter struct{ *message.Message }

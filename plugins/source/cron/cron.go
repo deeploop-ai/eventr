@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/deeploop-ai/eventr/internal/basestage"
@@ -52,13 +53,15 @@ type Source struct {
 	loc      *time.Location
 	body     string
 
-	mu  sync.Mutex
-	out chan<- *message.Message
+	mu      sync.Mutex
+	out     chan<- *message.Message
+	stopped atomic.Bool
 }
 
 func (s *Source) Consume(ctx context.Context, out chan<- *message.Message) error {
 	s.mu.Lock()
 	s.out = out
+	s.stopped.Store(false)
 	s.mu.Unlock()
 
 	c := cron.New(
@@ -73,6 +76,8 @@ func (s *Source) Consume(ctx context.Context, out chan<- *message.Message) error
 	}
 	c.Start()
 	<-ctx.Done()
+	// Mark stopped before stopping cron to prevent emit from sending on closed channels
+	s.stopped.Store(true)
 	stopCtx := c.Stop()
 	select {
 	case <-stopCtx.Done():
@@ -82,13 +87,16 @@ func (s *Source) Consume(ctx context.Context, out chan<- *message.Message) error
 }
 
 func (s *Source) emit(ctx context.Context) {
+	if s.stopped.Load() {
+		return
+	}
 	payload := []byte(s.body)
 	if len(payload) == 0 {
 		payload = []byte(`{"tick":true}`)
 	}
 	meta := map[string]any{
-		"source":     "cron",
-		"cron.schedule": s.schedule,
+		"source":          "cron",
+		"cron.schedule":   s.schedule,
 	}
 	var parsed map[string]any
 	_ = json.Unmarshal(payload, &parsed)
@@ -106,5 +114,6 @@ func (s *Source) emit(ctx context.Context) {
 	select {
 	case <-ctx.Done():
 	case out <- msg:
+	default: // backpressure — drop, don't block cron scheduler
 	}
 }

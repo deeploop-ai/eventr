@@ -6,6 +6,13 @@ import (
 	"github.com/deeploop-ai/eventr/internal/config"
 )
 
+// Stage kind constants — used for IR serialization and engine comparisons.
+const (
+	KindSource    = "source"
+	KindTransform = "transform"
+	KindSink      = "sink"
+)
+
 type TopologyIR struct {
 	Name           string
 	Engine         config.EngineConfig

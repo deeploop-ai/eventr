@@ -54,18 +54,16 @@ func (m *Message) Ack(err error) {
 func (m *Message) ShallowCopy() *Message {
 	cp := &Message{
 		ID:              m.ID,
-		Payload:           append([]byte(nil), m.Payload...),
-		Metadata:          shallowCopyMap(m.Metadata),
-		parsedData:        m.parsedData,
-		parsedDirty:       m.parsedDirty,
-		parsedCodec:       m.parsedCodec,
-		originalPayload:   m.originalPayload,
-		ctx:               m.ctx,
-		errCount:          m.errCount,
+		Payload:         m.Payload, // share reference — COW: only re-allocated on re-serialize
+		Metadata:        shallowCopyMap(m.Metadata),
+		parsedData:      m.parsedData,
+		parsedDirty:     m.parsedDirty,
+		parsedCodec:     m.parsedCodec,
+		originalPayload: m.originalPayload,
+		ctx:             m.ctx,
+		errCount:        m.errCount,
 	}
-	if m.parsedData != nil {
-		cp.readOnly.Store(true)
-	}
+	cp.readOnly.Store(true)
 	return cp
 }
 

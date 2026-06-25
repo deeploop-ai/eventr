@@ -39,17 +39,17 @@ func Validate(ir *TopologyIR) error {
 	var sources, sinks int
 	for id, st := range stageIDs {
 		switch st.Kind {
-		case "source":
+		case KindSource:
 			sources++
 			if incoming[id] > 0 {
 				return fmt.Errorf("source %q must not have incoming edges", id)
 			}
-		case "sink":
+		case KindSink:
 			sinks++
 			if len(outgoing[id]) > 0 {
 				return fmt.Errorf("sink %q must not have outgoing edges", id)
 			}
-		case "transform":
+		case KindTransform:
 		default:
 			return fmt.Errorf("stage %q: unknown kind %q", id, st.Kind)
 		}
@@ -63,7 +63,7 @@ func Validate(ir *TopologyIR) error {
 	}
 
 	for id, st := range stageIDs {
-		if st.Kind != "source" && incoming[id] == 0 {
+		if st.Kind != KindSource && incoming[id] == 0 {
 			return fmt.Errorf("stage %q has no incoming edges", id)
 		}
 	}
@@ -142,9 +142,9 @@ func hasSourceToSinkPath(stages []StageIR, edges []EdgeIR) bool {
 	sinks := map[string]bool{}
 	for _, st := range stages {
 		switch st.Kind {
-		case "source":
+		case KindSource:
 			sources[st.ID] = true
-		case "sink":
+		case KindSink:
 			sinks[st.ID] = true
 		}
 	}

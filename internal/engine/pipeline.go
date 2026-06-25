@@ -3,9 +3,13 @@ package engine
 import (
 	"context"
 	"fmt"
+	"math"
 	"sync"
 	"sync/atomic"
+	"time"
 
+	"github.com/deeploop-ai/eventr/internal/codec"
+	"github.com/deeploop-ai/eventr/internal/config"
 	"github.com/deeploop-ai/eventr/internal/message"
 	"github.com/deeploop-ai/eventr/internal/registry"
 	"github.com/deeploop-ai/eventr/internal/stage"
@@ -14,26 +18,33 @@ import (
 )
 
 type Pipeline struct {
-	ir      *topology.TopologyIR
-	reg     *registry.Registry
-	stages  map[string]stage.Stage
-	graph   *runtimeGraph
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup
-	stageWG sync.WaitGroup
-	started atomic.Bool
+	ir       *topology.TopologyIR
+	reg      *registry.Registry
+	stages   map[string]stage.Stage
+	graph    *runtimeGraph
+	decoders map[string]codec.Codec // stage ID → decoder
+	encoders map[string]codec.Codec // stage ID → encoder
+	cancel   context.CancelFunc
+	wg       sync.WaitGroup
+	stageWG  sync.WaitGroup
+	started  atomic.Bool
 }
 
 func NewPipeline(ctx context.Context, reg *registry.Registry, ir *topology.TopologyIR) (*Pipeline, error) {
 	p := &Pipeline{
-		ir:     ir,
-		reg:    reg,
-		stages: make(map[string]stage.Stage),
+		ir:       ir,
+		reg:      reg,
+		stages:   make(map[string]stage.Stage),
+		decoders: make(map[string]codec.Codec),
+		encoders: make(map[string]codec.Codec),
 	}
 	for _, st := range ir.Stages {
 		if err := p.instantiateStage(st); err != nil {
 			return nil, err
 		}
+	}
+	if err := p.resolveCodecs(ir); err != nil {
+		return nil, err
 	}
 	g, err := buildRuntimeGraph(ir)
 	if err != nil {
@@ -41,6 +52,39 @@ func NewPipeline(ctx context.Context, reg *registry.Registry, ir *topology.Topol
 	}
 	p.graph = g
 	return p, nil
+}
+
+func (p *Pipeline) resolveCodecs(ir *topology.TopologyIR) error {
+	for _, st := range ir.Stages {
+		if dec, err := p.resolveCodecRef(st.Decoder, "decoder"); err != nil {
+			return fmt.Errorf("stage %q: %w", st.ID, err)
+		} else if dec != nil {
+			p.decoders[st.ID] = dec
+		}
+		if enc, err := p.resolveCodecRef(st.Encoder, "encoder"); err != nil {
+			return fmt.Errorf("stage %q: %w", st.ID, err)
+		} else if enc != nil {
+			p.encoders[st.ID] = enc
+		}
+	}
+	return nil
+}
+
+func (p *Pipeline) resolveCodecRef(ref *config.CodecRef, role string) (codec.Codec, error) {
+	if ref == nil || ref.IsEmpty() {
+		return nil, nil
+	}
+	if ref.Ref != "" {
+		cir, ok := p.ir.Codecs[ref.Ref]
+		if !ok {
+			return nil, fmt.Errorf("%s ref %q not found", role, ref.Ref)
+		}
+		return p.reg.CreateCodec(cir.Type, cir.Config)
+	}
+	if ref.Type != "" {
+		return p.reg.CreateCodec(ref.Type, nil)
+	}
+	return nil, nil
 }
 
 func (p *Pipeline) instantiateStage(st topology.StageIR) error {
@@ -61,15 +105,15 @@ func (p *Pipeline) instantiateStage(st topology.StageIR) error {
 	var s stage.Stage
 	var err error
 	switch st.Kind {
-	case "source":
+	case topology.KindSource:
 		var src stage.Source
 		src, err = p.reg.CreateSource(st.Type, st.ID, cfg)
 		s = src
-	case "transform":
+	case topology.KindTransform:
 		var tr stage.Transform
 		tr, err = p.reg.CreateTransform(st.Type, st.ID, cfg)
 		s = tr
-	case "sink":
+	case topology.KindSink:
 		var sk stage.Sink
 		sk, err = p.reg.CreateSink(st.Type, st.ID, cfg)
 		s = sk
@@ -106,12 +150,22 @@ func (p *Pipeline) Start(ctx context.Context) error {
 }
 
 func (p *Pipeline) Stop(ctx context.Context) error {
+	// 1. Stop all sources first — no new messages
+	for id, st := range p.stages {
+		if _, ok := st.(stage.Source); ok {
+			_ = st.Stop(ctx)
+		}
+		_ = id
+	}
+	// 2. Cancel context to signal all goroutines to drain
 	if p.cancel != nil {
 		p.cancel()
 	}
+	// 3. Wait for in-flight messages to drain (with timeout from context)
 	done := make(chan struct{})
 	go func() {
 		p.wg.Wait()
+		p.stageWG.Wait()
 		close(done)
 	}()
 	select {
@@ -119,9 +173,16 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+	// 4. Flush all sinks (write remaining batches)
 	for _, st := range p.stages {
 		if sk, ok := st.(stage.Sink); ok {
 			_ = sk.Flush(ctx)
+		}
+	}
+	// 5. Stop all remaining stages (transforms + sinks)
+	for _, st := range p.stages {
+		if _, ok := st.(stage.Source); ok {
+			continue // sources already stopped
 		}
 		_ = st.Stop(ctx)
 	}
@@ -150,14 +211,14 @@ func (p *Pipeline) run(ctx context.Context) {
 	}()
 
 	for id, node := range p.graph.nodes {
-		if node.kind == "transform" {
+		if node.kind == topology.KindTransform {
 			p.startTransformFanIn(node)
 		}
 		_ = id
 	}
 
 	for id, node := range p.graph.nodes {
-		if node.kind != "sink" {
+		if node.kind != topology.KindSink {
 			continue
 		}
 		p.stageWG.Add(1)
@@ -168,7 +229,7 @@ func (p *Pipeline) run(ctx context.Context) {
 	}
 
 	for id, node := range p.graph.nodes {
-		if node.kind != "transform" {
+		if node.kind != topology.KindTransform {
 			continue
 		}
 		p.stageWG.Add(1)
@@ -179,7 +240,7 @@ func (p *Pipeline) run(ctx context.Context) {
 	}
 
 	for id, node := range p.graph.nodes {
-		if node.kind != "source" {
+		if node.kind != topology.KindSource {
 			continue
 		}
 		p.stageWG.Add(1)
@@ -216,6 +277,10 @@ func (p *Pipeline) runSource(ctx context.Context, id string, node *runtimeNode) 
 			if msg.ID == "" {
 				msg.ID = uuid.NewString()
 			}
+			// Set parsedCodec for lazy decode downstream
+			if dec, ok := p.decoders[id]; ok && msg.ParsedCodec() == "" {
+				msg.SetParsedCodec(dec.Name())
+			}
 			if acking, ok := src.(stage.AckingSource); ok {
 				msg.SetAckFn(func(err error) {
 					acking.OnAck(msg, err)
@@ -226,30 +291,74 @@ func (p *Pipeline) runSource(ctx context.Context, id string, node *runtimeNode) 
 	}
 }
 
+func (p *Pipeline) ensureParsed(msg *message.Message) error {
+	if msg.ParsedData() != nil {
+		return nil
+	}
+	codecName := msg.ParsedCodec()
+	if codecName == "" {
+		return nil
+	}
+	c, err := p.reg.CreateCodec(codecName, nil)
+	if err != nil {
+		return err
+	}
+	data, err := c.Decode(msg.Payload)
+	if err != nil {
+		return fmt.Errorf("codec %q decode: %w", codecName, err)
+	}
+	msg.SetParsedData(data)
+	return nil
+}
+
+func (p *Pipeline) reserializeIfDirty(msg *message.Message, encoderID string) error {
+	if !msg.ParsedDirty() {
+		return nil
+	}
+	enc, ok := p.encoders[encoderID]
+	if !ok {
+		return nil // no encoder — keep payload as-is
+	}
+	data := msg.ParsedData()
+	if data == nil {
+		return nil
+	}
+	newPayload, err := enc.Encode(data)
+	if err != nil {
+		return fmt.Errorf("encode: %w", err)
+	}
+	msg.BackupOriginalPayload()
+	msg.Payload = newPayload
+	return nil
+}
+
 func (p *Pipeline) dispatchFrom(ctx context.Context, fromID string, msg *message.Message) {
 	edges := p.graph.outgoing[fromID]
 	if len(edges) == 0 {
 		msg.Ack(nil)
 		return
 	}
-	matched := p.matchEdges(ctx, edges, msg)
+	matched := p.matchEdges(ctx, fromID, edges, msg)
 	if len(matched) == 0 {
 		msg.Ack(nil)
 		return
 	}
 	var pending int32 = int32(len(matched))
-	parentAck := func(err error) {
-		if err != nil {
-			msg.Ack(err)
-		}
-	}
-	_ = parentAck
+	var firstErr atomic.Value // stores the first non-nil error
+	var errStored int32       // 0 = no error stored yet
+
 	for _, edge := range matched {
-		edge := edge
 		child := msg.ShallowCopy()
 		child.SetAckFn(func(err error) {
+			if err != nil && atomic.CompareAndSwapInt32(&errStored, 0, 1) {
+				firstErr.Store(err)
+			}
 			if atomic.AddInt32(&pending, -1) == 0 {
-				msg.Ack(err)
+				var ackErr error
+				if stored := firstErr.Load(); stored != nil {
+					ackErr = stored.(error)
+				}
+				msg.Ack(ackErr)
 			}
 		})
 		node := p.graph.nodes[edge.To]
@@ -262,14 +371,16 @@ func (p *Pipeline) dispatchFrom(ctx context.Context, fromID string, msg *message
 	}
 }
 
-func (p *Pipeline) matchEdges(ctx context.Context, edges []topology.EdgeIR, msg *message.Message) []topology.EdgeIR {
+func (p *Pipeline) matchEdges(ctx context.Context, fromID string, edges []topology.EdgeIR, msg *message.Message) []topology.EdgeIR {
+	node := p.graph.nodes[fromID]
 	var matched []topology.EdgeIR
 	for _, edge := range edges {
 		if edge.Condition == "" {
 			matched = append(matched, edge)
 			continue
 		}
-		ok, err := p.graph.evalCondition(edge.Condition, msg)
+		prg := node.conditions[edge.To]
+		ok, err := p.graph.evalCondition(prg, msg)
 		if err != nil {
 			if edge.Required {
 				msg.Ack(err)
@@ -292,9 +403,37 @@ func (p *Pipeline) runTransform(ctx context.Context, id string, node *runtimeNod
 		case <-ctx.Done():
 			return
 		case batch := <-node.batchIn:
-			out, err := tr.Process(ctx, batch)
+			var filtered []*message.Message
+			var passThrough []*message.Message
+			for _, m := range batch {
+				if err := p.ensureParsed(m); err != nil {
+					m.Ack(err)
+					continue
+				}
+				// Check predicate — false means skip this transform (pass-through)
+				if node.predicate != nil {
+					ok, evalErr := p.graph.evalCondition(node.predicate, m)
+					if evalErr != nil {
+						m.Ack(evalErr)
+						continue
+					}
+					if !ok {
+						passThrough = append(passThrough, m)
+						continue
+					}
+				}
+				filtered = append(filtered, m)
+			}
+			// Pass-through messages skip Process and go directly to downstream
+			for _, m := range passThrough {
+				p.dispatchFrom(ctx, id, m)
+			}
+			if len(filtered) == 0 {
+				continue
+			}
+			out, err := tr.Process(ctx, filtered)
 			if err != nil {
-				for _, m := range batch {
+				for _, m := range filtered {
 					m.Ack(err)
 				}
 				continue
@@ -303,7 +442,7 @@ func (p *Pipeline) runTransform(ctx context.Context, id string, node *runtimeNod
 				p.dispatchFrom(ctx, id, m)
 			}
 			if len(out) == 0 {
-				for _, m := range batch {
+				for _, m := range filtered {
 					m.Ack(nil)
 				}
 			}
@@ -314,32 +453,146 @@ func (p *Pipeline) runTransform(ctx context.Context, id string, node *runtimeNod
 func (p *Pipeline) runSink(ctx context.Context, id string, node *runtimeNode) {
 	sk := p.stages[id].(stage.Sink)
 	batchSize := 1
+	var batchTimeout time.Duration
 	for _, st := range p.ir.Stages {
-		if st.ID == id && st.Batch != nil && st.Batch.Size > 0 {
-			batchSize = st.Batch.Size
+		if st.ID == id && st.Batch != nil {
+			if st.Batch.Size > 0 {
+				batchSize = st.Batch.Size
+			}
+			if st.Batch.Timeout != "" {
+				batchTimeout, _ = time.ParseDuration(st.Batch.Timeout)
+			}
 		}
 	}
+	// Find delivery spec from any incoming edge (uses first found; fan-in edges merge at this sink)
+	delivery := p.findDeliveryForStage(id)
+
 	batch := make([]*message.Message, 0, batchSize)
+	var timer *time.Timer
+	var timerC <-chan time.Time
+	if batchTimeout > 0 {
+		timer = time.NewTimer(batchTimeout)
+		timerC = timer.C
+	}
 	flush := func() {
 		if len(batch) == 0 {
 			return
 		}
-		err := sk.Write(ctx, batch)
+		for _, m := range batch {
+			_ = p.reserializeIfDirty(m, id)
+		}
+		err := p.writeWithRetry(ctx, sk, batch, delivery)
+		if err != nil {
+			p.deliverToDLQ(batch, err, id)
+		}
 		for _, m := range batch {
 			m.Ack(err)
 		}
 		batch = batch[:0]
+		if timer != nil {
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(batchTimeout)
+		}
 	}
 	for {
 		select {
 		case <-ctx.Done():
+			if timer != nil {
+				timer.Stop()
+			}
 			flush()
 			return
+		case <-timerC:
+			flush()
 		case msg := <-node.inbound:
 			batch = append(batch, msg)
 			if len(batch) >= batchSize {
 				flush()
 			}
 		}
+	}
+}
+
+func (p *Pipeline) findDeliveryForStage(stageID string) *config.DeliverySpec {
+	for _, edge := range p.ir.Edges {
+		if edge.To == stageID && edge.Delivery != nil {
+			return edge.Delivery
+		}
+	}
+	return nil
+}
+
+func (p *Pipeline) writeWithRetry(ctx context.Context, sk stage.Sink, batch []*message.Message, delivery *config.DeliverySpec) error {
+	maxRetries := 0
+	backoff := "exponential"
+	if delivery != nil && delivery.Retry != nil {
+		maxRetries = delivery.Retry.Max
+		if delivery.Retry.Backoff != "" {
+			backoff = delivery.Retry.Backoff
+		}
+	}
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		lastErr = sk.Write(ctx, batch)
+		if lastErr == nil {
+			return nil
+		}
+		if attempt < maxRetries {
+			delay := retryDelay(attempt, backoff)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(delay):
+			}
+		}
+	}
+	return fmt.Errorf("retries exhausted (%d attempts): %w", maxRetries+1, lastErr)
+}
+
+func retryDelay(attempt int, backoff string) time.Duration {
+	base := 100 * time.Millisecond
+	switch backoff {
+	case "exponential":
+		return time.Duration(math.Pow(2, float64(attempt))) * base
+	case "linear":
+		return time.Duration(attempt+1) * base
+	default:
+		return base
+	}
+}
+
+func (p *Pipeline) deliverToDLQ(batch []*message.Message, err error, sourceStageID string) {
+	dlqSinkID := ""
+	if p.ir.DLQ != nil {
+		dlqSinkID = p.ir.DLQ.Sink
+	}
+	if dlqSinkID == "" {
+		// No DLQ configured — messages are dropped (already acked with error)
+		return
+	}
+	dlqStage, ok := p.stages[dlqSinkID]
+	if !ok {
+		return
+	}
+	dlqSink, ok := dlqStage.(stage.Sink)
+	if !ok {
+		return
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	for _, m := range batch {
+		dlqMsg := message.New(m.OriginalPayload(), map[string]any{
+			"er-error-reason":   err.Error(),
+			"er-error-stage":    sourceStageID,
+			"er-error-timestamp": now,
+			"er-original-pipeline": p.ir.Name,
+			"er-retry-count":    "0",
+		})
+		dlqMsg.ID = uuid.NewString()
+		_ = dlqSink.Write(context.Background(), []*message.Message{dlqMsg})
 	}
 }
