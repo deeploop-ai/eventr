@@ -2,7 +2,7 @@
 
 Go 实现的 DAG 事件路由器（原 EventRouter v2）。以通用 `Message`（`[]byte` payload + metadata）为中心，通过 **Source → Transform → Sink** 有向无环图处理流式数据，支持条件路由、per-edge 缓冲与投递策略、重试/DLQ 与 at-least-once Ack。
 
-> **当前状态：** 设计阶段（`v2.0-draft`），尚无生产代码；主文档与 spike 已就绪，实现按 [开发路线图](eventr-design.md#12-开发路线图) 推进。
+> **当前状态：** v2.0-alpha 实现中；核心引擎、配置加载、CLI 与 P0 插件（kafka/cron/http 等）已可构建运行，详见 [开发路线图](eventr-design.md#12-开发路线图)。
 
 ## 特性概览
 
@@ -84,15 +84,17 @@ steps:
 | [`eventr-design.md`](eventr-design.md) | 需求与设计方案（主文档） |
 | [`competitor-research.md`](competitor-research.md) | 竞品调研 |
 | [`design-review.md`](design-review.md) | 设计评审（部分条目已过时，以主文档为准） |
-| [`spike/hocon/`](spike/hocon/) | HOCON 解析库（`gurkankaymak/hocon`）验收 spike |
+| [`cmd/eventr/`](cmd/eventr/) | CLI（`run` / `validate`） |
+| [`internal/`](internal/) | 引擎、配置、拓扑、eql |
+| [`plugins/`](plugins/) | Source / Transform / Sink / Codec 插件 |
+| [`testdata/pipelines/`](testdata/pipelines/) | 示例 YAML / HOCON 配置 |
 
-## HOCON spike
-
-实现前用于验证 HOCON 解析与 eventr 配置形态的兼容性：
+## 构建与验证
 
 ```bash
-cd spike/hocon
-go test -v .
+go test ./...
+go build -o bin/eventr ./cmd/eventr
+bin/eventr validate --config testdata/pipelines/linear.yaml
 ```
 
 ## 文档
