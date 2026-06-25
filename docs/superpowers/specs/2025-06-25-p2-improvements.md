@@ -51,14 +51,14 @@ These are deferred improvements that don't block alpha functionality but should 
 - [ ] Pending queue management
 - [ ] Backpressure skip when downstream full
 
-### 5. error_mode Chain (v2.0)
+### 5. error_mode Chain (v2.0) — Sprint 2 done
 
 **Design ref:** §7.8
 
-- [ ] Propagate error_mode from engine → pipeline → transform
-- [ ] `propagate` (default): errors → delivery/DLQ
-- [ ] `ignore`: errors → false, no DLQ, metric logged
-- [ ] `silent`: same as ignore but no metric
+- [x] Propagate error_mode from engine → pipeline → transform
+- [x] `propagate` (default): errors → delivery/DLQ
+- [x] `ignore`: errors → false, no DLQ, metric logged
+- [x] `silent`: same as ignore but no metric
 
 ### 6. WASM Transform (v2.0)
 

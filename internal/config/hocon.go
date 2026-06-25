@@ -254,6 +254,7 @@ func mapPipelineStages(items []any) ([]StageConfig, error) {
 			Type:        strVal(m["type"]),
 			Workers:     intVal(m["workers"]),
 			Predicate:   strVal(m["predicate"]),
+			ErrorMode:   strVal(m["error_mode"]),
 			Ordering:    strVal(m["ordering"]),
 			MaxInFlight: intVal(m["max_in_flight"]),
 			Decoder:     mapCodecRef(m["decoder"]),

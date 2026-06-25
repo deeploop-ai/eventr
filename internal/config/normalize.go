@@ -179,6 +179,7 @@ func NormalizeSteps(cfg *PipelineConfig) ([]StageConfig, []EdgeConfig, error) {
 				Type:      step.Transform.Type,
 				Workers:   step.Transform.Workers,
 				Predicate: step.Transform.Predicate,
+				ErrorMode: step.Transform.ErrorMode,
 				Config:    step.Transform.Config,
 			})
 		}

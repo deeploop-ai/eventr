@@ -48,6 +48,7 @@ func FromConfig(cfg *config.PipelineConfig) (*TopologyIR, error) {
 			Type:        st.Type,
 			Workers:     st.Workers,
 			Predicate:   st.Predicate,
+			ErrorMode:   st.ErrorMode,
 			Decoder:     st.Decoder,
 			Encoder:     st.Encoder,
 			Batch:       st.Batch,

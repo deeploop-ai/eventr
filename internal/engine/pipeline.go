@@ -19,11 +19,13 @@ import (
 )
 
 type Pipeline struct {
-	ir       *topology.TopologyIR
-	reg      *registry.Registry
-	metrics  *observability.Metrics
-	stages   map[string]stage.Stage
-	graph    *runtimeGraph
+	ir             *topology.TopologyIR
+	reg            *registry.Registry
+	metrics        *observability.Metrics
+	stages         map[string]stage.Stage
+	stageErrorMode map[string]string
+	inflight       atomic.Int32
+	graph          *runtimeGraph
 	decoders map[string]codec.Codec // stage ID → decoder
 	encoders map[string]codec.Codec // stage ID → encoder
 	cancel   context.CancelFunc
@@ -34,12 +36,18 @@ type Pipeline struct {
 
 func NewPipeline(ctx context.Context, reg *registry.Registry, ir *topology.TopologyIR, metrics *observability.Metrics) (*Pipeline, error) {
 	p := &Pipeline{
-		ir:       ir,
-		reg:      reg,
-		metrics:  metrics,
-		stages:   make(map[string]stage.Stage),
-		decoders: make(map[string]codec.Codec),
-		encoders: make(map[string]codec.Codec),
+		ir:             ir,
+		reg:            reg,
+		metrics:        metrics,
+		stages:         make(map[string]stage.Stage),
+		stageErrorMode: make(map[string]string),
+		decoders:       make(map[string]codec.Codec),
+		encoders:       make(map[string]codec.Codec),
+	}
+	for _, st := range ir.Stages {
+		if st.ErrorMode != "" {
+			p.stageErrorMode[st.ID] = st.ErrorMode
+		}
 	}
 	for _, st := range ir.Stages {
 		if err := p.instantiateStage(st); err != nil {
@@ -252,13 +260,22 @@ func (p *Pipeline) run(ctx context.Context) {
 		}(id, node)
 	}
 
+	var transformNodes []*runtimeNode
 	for id, node := range p.graph.nodes {
 		if node.kind != topology.KindTransform {
 			continue
 		}
-		workers := node.workers
+		transformNodes = append(transformNodes, node)
+		_ = id
+	}
+	workerAlloc := allocateTransformWorkers(transformNodes, p.ir.Engine.MaxWorkers)
+	for id, node := range p.graph.nodes {
+		if node.kind != topology.KindTransform {
+			continue
+		}
+		workers := workerAlloc[id]
 		if workers < 1 {
-			workers = 1
+			continue
 		}
 		for i := 0; i < workers; i++ {
 			p.stageWG.Add(1)
@@ -320,7 +337,9 @@ func (p *Pipeline) runSource(ctx context.Context, id string, node *runtimeNode) 
 					acking.OnAck(msg, err)
 				})
 			}
-			p.trackMessageLifecycle(msg)
+			if err := p.beginMessageLifecycle(ctx, msg); err != nil {
+				return
+			}
 			p.dispatchFrom(ctx, id, msg)
 		}
 	}
@@ -402,19 +421,6 @@ func (p *Pipeline) dispatchFrom(ctx context.Context, fromID string, msg *message
 	}
 }
 
-func (p *Pipeline) trackMessageLifecycle(msg *message.Message) {
-	if p.metrics == nil {
-		return
-	}
-	pipeline := p.ir.Name
-	start := time.Now()
-	p.metrics.IncInflight(pipeline)
-	msg.WrapAckFn(func(err error) {
-		p.metrics.DecInflight(pipeline)
-		p.metrics.RecordEvent(pipeline, observability.EventStatus(err), time.Since(start))
-	})
-}
-
 func (p *Pipeline) matchEdges(ctx context.Context, fromID string, edges []topology.EdgeIR, msg *message.Message) []topology.EdgeIR {
 	node := p.graph.nodes[fromID]
 	var matched []topology.EdgeIR
@@ -426,8 +432,12 @@ func (p *Pipeline) matchEdges(ctx context.Context, fromID string, edges []topolo
 		prg := node.conditions[edge.To]
 		ok, err := p.evalCondition(ctx, prg, msg)
 		if err != nil {
+			treatAsFalse, ackErr := p.handleEvalError(fromID, err)
+			if treatAsFalse {
+				continue
+			}
 			if edge.Required {
-				msg.Ack(err)
+				msg.Ack(ackErr)
 				return nil
 			}
 			continue
@@ -450,14 +460,14 @@ func (p *Pipeline) runTransform(ctx context.Context, id string, node *runtimeNod
 			var passThrough []*message.Message
 			for _, m := range batch {
 				if err := p.ensureParsed(m); err != nil {
-					m.Ack(err)
+					p.ackMessageError(id, m, err)
 					continue
 				}
 				// Check predicate — false means skip this transform (pass-through)
 				if node.predicate != nil {
 					ok, evalErr := p.evalCondition(ctx, node.predicate, m)
 					if evalErr != nil {
-						m.Ack(evalErr)
+						p.ackMessageError(id, m, evalErr)
 						continue
 					}
 					if !ok {
@@ -483,9 +493,7 @@ func (p *Pipeline) runTransform(ctx context.Context, id string, node *runtimeNod
 				if p.metrics != nil {
 					p.metrics.IncStageError(p.ir.Name, id, "process")
 				}
-				for _, m := range filtered {
-					m.Ack(err)
-				}
+				p.ackBatchError(id, filtered, err)
 				continue
 			}
 			p.dispatchTransformOutputs(ctx, id, filtered, out)

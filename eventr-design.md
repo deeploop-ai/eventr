@@ -2172,7 +2172,7 @@ v2 增加 `eventr eql`（CEL/eql REPL）、`eventr lint`（配置 lint）。
 - [x] Codec 体系：json/raw + 顶层 codecs 配置 + 惰性 ParsedData
 - [x] 3 个 Source（kafka/http_server/cron）+ 3 个 Sink（kafka/http/drop）+ 3 个 Transform（map/filter/route）
 - [ ] WASM Transform（占位，推迟至 v2.0）
-- [x] 多 Pipeline 运行时（进程内隔离；`engine.max_workers`/`max_inflight` 待接线）
+- [x] 多 Pipeline 运行时（进程内隔离；`engine.max_workers`/`max_inflight` 已接线）
 - [x] Metrics（`eventr_` 前缀）+ Tracing（OTLP 骨架）+ Health endpoints
 - [x] CLI：run + validate
 
@@ -2191,11 +2191,11 @@ v2 增加 `eventr eql`（CEL/eql REPL）、`eventr lint`（配置 lint）。
 - [x] 结构化 JSON 日志（`slog`）+ 动态 level 调整（`PUT /debug/loglevel`）
 - [x] OTLP Tracing 接口骨架（pipeline → stage 粒度，noop 实现）
 
-#### Sprint 2：引擎级约束 + error_mode
+#### Sprint 2：引擎级约束 + error_mode — **已完成**
 
-- [ ] `engine.max_workers` 全局 worker 池限制
-- [ ] `engine.max_inflight` 全 pipeline 在途消息背压
-- [ ] `error_mode` 传播链（`propagate` / `ignore` / `silent`）
+- [x] `engine.max_workers` 全局 worker 池限制
+- [x] `engine.max_inflight` 全 pipeline 在途消息背压
+- [x] `error_mode` 传播链（`propagate` / `ignore` / `silent`）
 
 #### Sprint 3：Edge Disk Buffer + 优雅停机加固
 

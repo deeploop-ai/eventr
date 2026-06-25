@@ -85,9 +85,10 @@ type StageConfig struct {
 	DependsOn DependsOnList `yaml:"depends_on"`
 	Decoder   *CodecRef     `yaml:"decoder"`
 	Encoder   *CodecRef     `yaml:"encoder"`
-	Workers   int           `yaml:"workers"`
-	Predicate string        `yaml:"predicate"`
-	Batch     *BatchConfig  `yaml:"batch"`
+	Workers     int           `yaml:"workers"`
+	Predicate   string        `yaml:"predicate"`
+	ErrorMode   string        `yaml:"error_mode"`
+	Batch       *BatchConfig  `yaml:"batch"`
 	Ordering  string        `yaml:"ordering"`
 	MaxInFlight int         `yaml:"max_in_flight"`
 	Config    map[string]any `yaml:"config"`
