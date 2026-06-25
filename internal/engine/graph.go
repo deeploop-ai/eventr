@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"encoding/json"
 	"fmt"
 
 	"github.com/deeploop-ai/eventr/internal/eql"
@@ -17,7 +16,7 @@ type runtimeNode struct {
 	outBuffer  int
 	workers    int
 	conditions map[string]*eql.Program
-	predicate  *eql.Program // pre-compiled transform predicate (Kafka Connect style)
+	predicate  *eql.Program
 }
 
 type runtimeGraph struct {
@@ -30,8 +29,20 @@ func buildRuntimeGraph(ir *topology.TopologyIR) (*runtimeGraph, error) {
 		nodes:    make(map[string]*runtimeNode),
 		outgoing: make(map[string][]topology.EdgeIR),
 	}
+
+	inboundBuf := make(map[string]int)
+	for _, edge := range ir.Edges {
+		size := edge.BufferSize()
+		if size > inboundBuf[edge.To] {
+			inboundBuf[edge.To] = size
+		}
+	}
+
 	for _, st := range ir.Stages {
-		buf := 64
+		buf := inboundBuf[st.ID]
+		if buf == 0 {
+			buf = 64
+		}
 		workers := st.Workers
 		if workers == 0 {
 			workers = 1
@@ -44,7 +55,6 @@ func buildRuntimeGraph(ir *topology.TopologyIR) (*runtimeGraph, error) {
 			outBuffer: buf,
 			workers:   workers,
 		}
-		// Pre-compile transform predicate (Kafka Connect style conditional application)
 		if st.Predicate != "" && st.Kind == topology.KindTransform {
 			prg, err := eql.CompileFilter(st.Predicate)
 			if err != nil {
@@ -85,15 +95,12 @@ func (g *runtimeGraph) evalCondition(prg *eql.Program, msg *message.Message) (bo
 }
 
 func extractPayload(msg *message.Message) map[string]any {
-	payload := map[string]any{}
 	if msg.ParsedData() != nil {
 		if m, ok := msg.ParsedData().(map[string]any); ok {
-			payload = m
+			return m
 		}
-	} else if len(msg.Payload) > 0 {
-		_ = json.Unmarshal(msg.Payload, &payload)
 	}
-	return payload
+	return map[string]any{}
 }
 
 type msgAdapter struct{ *message.Message }

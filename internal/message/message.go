@@ -2,6 +2,7 @@ package message
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 )
 
@@ -13,7 +14,9 @@ type Message struct {
 	parsedData      any
 	parsedDirty     bool
 	parsedCodec     string
+	decoderStageID  string
 	readOnly        atomic.Bool
+	cowMu           sync.Mutex
 	originalPayload []byte
 	ctx             context.Context
 	ackFn           func(error)
@@ -59,6 +62,7 @@ func (m *Message) ShallowCopy() *Message {
 		parsedData:      m.parsedData,
 		parsedDirty:     m.parsedDirty,
 		parsedCodec:     m.parsedCodec,
+		decoderStageID:  m.decoderStageID,
 		originalPayload: m.originalPayload,
 		ctx:             m.ctx,
 		errCount:        m.errCount,
@@ -86,6 +90,14 @@ func (m *Message) SetParsedCodec(name string) {
 	m.parsedCodec = name
 }
 
+func (m *Message) DecoderStageID() string {
+	return m.decoderStageID
+}
+
+func (m *Message) SetDecoderStageID(id string) {
+	m.decoderStageID = id
+}
+
 func (m *Message) ParsedData() any {
 	return m.parsedData
 }
@@ -105,6 +117,8 @@ func (m *Message) ParsedDirty() bool {
 }
 
 func (m *Message) EnsureWritable() {
+	m.cowMu.Lock()
+	defer m.cowMu.Unlock()
 	if m.readOnly.Load() && m.parsedData != nil {
 		m.parsedData = deepCopyValue(m.parsedData)
 		m.readOnly.Store(false)

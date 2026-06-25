@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 
 	"github.com/deeploop-ai/eventr/internal/basestage"
 	"github.com/deeploop-ai/eventr/internal/eql"
@@ -30,16 +31,61 @@ func init() {
 			}
 			compiled[name] = prg
 		}
+		order, err := routeOrder(cfg, compiled)
+		if err != nil {
+			return nil, err
+		}
 		return &Transform{
 			Base:   basestage.Base{IDVal: id, KindVal: stage.KindTransform, TypeVal: "route"},
 			routes: compiled,
+			order:  order,
 		}, nil
 	})
+}
+
+func routeOrder(cfg map[string]any, routes map[string]*eql.Program) ([]string, error) {
+	if raw, ok := cfg["route_order"].([]any); ok {
+		out := make([]string, 0, len(raw))
+		seen := make(map[string]struct{}, len(raw))
+		for _, item := range raw {
+			name, ok := item.(string)
+			if !ok || name == "" {
+				continue
+			}
+			if _, exists := routes[name]; !exists {
+				return nil, fmt.Errorf("route_order: unknown route %q", name)
+			}
+			if _, dup := seen[name]; dup {
+				continue
+			}
+			seen[name] = struct{}{}
+			out = append(out, name)
+		}
+		if _, hasDefault := routes["_default"]; hasDefault {
+			if _, listed := seen["_default"]; !listed {
+				out = append(out, "_default")
+			}
+		}
+		return out, nil
+	}
+	names := make([]string, 0, len(routes))
+	for name := range routes {
+		if name == "_default" {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if _, ok := routes["_default"]; ok {
+		names = append(names, "_default")
+	}
+	return names, nil
 }
 
 type Transform struct {
 	basestage.Base
 	routes map[string]*eql.Program
+	order  []string
 }
 
 func (t *Transform) Process(ctx context.Context, batch []*message.Message) ([]*message.Message, error) {
@@ -60,11 +106,9 @@ func (t *Transform) Process(ctx context.Context, batch []*message.Message) ([]*m
 			Payload: payload,
 			Meta:    cp.Metadata,
 		}
-		matched := "_default"
-		for name, prg := range t.routes {
-			if name == "_default" {
-				continue
-			}
+		matched := ""
+		for _, name := range t.order {
+			prg := t.routes[name]
 			ok, err := prg.EvalFilter(evalCtx)
 			if err != nil {
 				return nil, err
@@ -74,16 +118,8 @@ func (t *Transform) Process(ctx context.Context, batch []*message.Message) ([]*m
 				break
 			}
 		}
-		if matched == "_default" {
-			if prg, ok := t.routes["_default"]; ok {
-				ok, err := prg.EvalFilter(evalCtx)
-				if err != nil {
-					return nil, err
-				}
-				if !ok {
-					continue
-				}
-			}
+		if matched == "" {
+			continue
 		}
 		if cp.Metadata == nil {
 			cp.Metadata = make(map[string]any)

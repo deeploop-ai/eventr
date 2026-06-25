@@ -79,10 +79,21 @@ func (p *Pipeline) resolveCodecRef(ref *config.CodecRef, role string) (codec.Cod
 		if !ok {
 			return nil, fmt.Errorf("%s ref %q not found", role, ref.Ref)
 		}
-		return p.reg.CreateCodec(cir.Type, cir.Config)
+		cfg := cir.Config
+		if ref.Config != nil {
+			merged := make(map[string]any, len(cfg)+len(ref.Config))
+			for k, v := range cfg {
+				merged[k] = v
+			}
+			for k, v := range ref.Config {
+				merged[k] = v
+			}
+			cfg = merged
+		}
+		return p.reg.CreateCodec(cir.Type, cfg)
 	}
 	if ref.Type != "" {
-		return p.reg.CreateCodec(ref.Type, nil)
+		return p.reg.CreateCodec(ref.Type, ref.Config)
 	}
 	return nil, nil
 }
@@ -189,15 +200,25 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 	return nil
 }
 
-func (p *Pipeline) startTransformFanIn(node *runtimeNode) {
+func (p *Pipeline) startTransformFanIn(ctx context.Context, node *runtimeNode) {
+	p.stageWG.Add(1)
 	go func() {
+		defer p.stageWG.Done()
 		for {
 			select {
+			case <-ctx.Done():
+				return
 			case msg, ok := <-node.inbound:
 				if !ok {
 					return
 				}
-				node.batchIn <- []*message.Message{msg}
+				batch := []*message.Message{msg}
+				select {
+				case <-ctx.Done():
+					msg.Ack(ctx.Err())
+					return
+				case node.batchIn <- batch:
+				}
 			}
 		}
 	}()
@@ -212,7 +233,7 @@ func (p *Pipeline) run(ctx context.Context) {
 
 	for id, node := range p.graph.nodes {
 		if node.kind == topology.KindTransform {
-			p.startTransformFanIn(node)
+			p.startTransformFanIn(ctx, node)
 		}
 		_ = id
 	}
@@ -232,11 +253,17 @@ func (p *Pipeline) run(ctx context.Context) {
 		if node.kind != topology.KindTransform {
 			continue
 		}
-		p.stageWG.Add(1)
-		go func(trID string, n *runtimeNode) {
-			defer p.stageWG.Done()
-			p.runTransform(ctx, trID, n)
-		}(id, node)
+		workers := node.workers
+		if workers < 1 {
+			workers = 1
+		}
+		for i := 0; i < workers; i++ {
+			p.stageWG.Add(1)
+			go func(trID string, n *runtimeNode) {
+				defer p.stageWG.Done()
+				p.runTransform(ctx, trID, n)
+			}(id, node)
+		}
 	}
 
 	for id, node := range p.graph.nodes {
@@ -277,9 +304,13 @@ func (p *Pipeline) runSource(ctx context.Context, id string, node *runtimeNode) 
 			if msg.ID == "" {
 				msg.ID = uuid.NewString()
 			}
-			// Set parsedCodec for lazy decode downstream
-			if dec, ok := p.decoders[id]; ok && msg.ParsedCodec() == "" {
-				msg.SetParsedCodec(dec.Name())
+			if dec, ok := p.decoders[id]; ok {
+				if msg.ParsedCodec() == "" {
+					msg.SetParsedCodec(dec.Name())
+				}
+				if msg.DecoderStageID() == "" {
+					msg.SetDecoderStageID(id)
+				}
 			}
 			if acking, ok := src.(stage.AckingSource); ok {
 				msg.SetAckFn(func(err error) {
@@ -295,17 +326,17 @@ func (p *Pipeline) ensureParsed(msg *message.Message) error {
 	if msg.ParsedData() != nil {
 		return nil
 	}
-	codecName := msg.ParsedCodec()
-	if codecName == "" {
+	stageID := msg.DecoderStageID()
+	if stageID == "" {
 		return nil
 	}
-	c, err := p.reg.CreateCodec(codecName, nil)
-	if err != nil {
-		return err
+	dec, ok := p.decoders[stageID]
+	if !ok {
+		return nil
 	}
-	data, err := c.Decode(msg.Payload)
+	data, err := dec.Decode(msg.Payload)
 	if err != nil {
-		return fmt.Errorf("codec %q decode: %w", codecName, err)
+		return fmt.Errorf("codec %q decode: %w", dec.Name(), err)
 	}
 	msg.SetParsedData(data)
 	return nil
@@ -362,12 +393,8 @@ func (p *Pipeline) dispatchFrom(ctx context.Context, fromID string, msg *message
 			}
 		})
 		node := p.graph.nodes[edge.To]
-		select {
-		case <-ctx.Done():
-			child.Ack(ctx.Err())
-			return
-		case node.inbound <- child:
-		}
+		strategy := edge.BufferStrategy()
+		sendToInbound(ctx, node.inbound, child, strategy)
 	}
 }
 
@@ -380,7 +407,7 @@ func (p *Pipeline) matchEdges(ctx context.Context, fromID string, edges []topolo
 			continue
 		}
 		prg := node.conditions[edge.To]
-		ok, err := p.graph.evalCondition(prg, msg)
+		ok, err := p.evalCondition(ctx, prg, msg)
 		if err != nil {
 			if edge.Required {
 				msg.Ack(err)
@@ -392,7 +419,6 @@ func (p *Pipeline) matchEdges(ctx context.Context, fromID string, edges []topolo
 			matched = append(matched, edge)
 		}
 	}
-	_ = ctx
 	return matched
 }
 
@@ -412,7 +438,7 @@ func (p *Pipeline) runTransform(ctx context.Context, id string, node *runtimeNod
 				}
 				// Check predicate — false means skip this transform (pass-through)
 				if node.predicate != nil {
-					ok, evalErr := p.graph.evalCondition(node.predicate, m)
+					ok, evalErr := p.evalCondition(ctx, node.predicate, m)
 					if evalErr != nil {
 						m.Ack(evalErr)
 						continue
@@ -438,14 +464,7 @@ func (p *Pipeline) runTransform(ctx context.Context, id string, node *runtimeNod
 				}
 				continue
 			}
-			for _, m := range out {
-				p.dispatchFrom(ctx, id, m)
-			}
-			if len(out) == 0 {
-				for _, m := range filtered {
-					m.Ack(nil)
-				}
-			}
+			p.dispatchTransformOutputs(ctx, id, filtered, out)
 		}
 	}
 }
@@ -454,8 +473,12 @@ func (p *Pipeline) runSink(ctx context.Context, id string, node *runtimeNode) {
 	sk := p.stages[id].(stage.Sink)
 	batchSize := 1
 	var batchTimeout time.Duration
+	maxInFlight := 1
 	for _, st := range p.ir.Stages {
-		if st.ID == id && st.Batch != nil {
+		if st.ID != id {
+			continue
+		}
+		if st.Batch != nil {
 			if st.Batch.Size > 0 {
 				batchSize = st.Batch.Size
 			}
@@ -463,9 +486,37 @@ func (p *Pipeline) runSink(ctx context.Context, id string, node *runtimeNode) {
 				batchTimeout, _ = time.ParseDuration(st.Batch.Timeout)
 			}
 		}
+		if st.MaxInFlight > 0 {
+			maxInFlight = st.MaxInFlight
+		}
+		if st.Ordering == "ordered" {
+			maxInFlight = 1
+		}
 	}
-	// Find delivery spec from any incoming edge (uses first found; fan-in edges merge at this sink)
 	delivery := p.findDeliveryForStage(id)
+
+	type writeJob struct {
+		batch []*message.Message
+	}
+	writeCh := make(chan writeJob, maxInFlight)
+
+	for i := 0; i < maxInFlight; i++ {
+		p.stageWG.Add(1)
+		go func() {
+			defer p.stageWG.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case job, ok := <-writeCh:
+					if !ok {
+						return
+					}
+					p.flushSinkBatch(ctx, sk, id, delivery, job.batch)
+				}
+			}
+		}()
+	}
 
 	batch := make([]*message.Message, 0, batchSize)
 	var timer *time.Timer
@@ -474,20 +525,23 @@ func (p *Pipeline) runSink(ctx context.Context, id string, node *runtimeNode) {
 		timer = time.NewTimer(batchTimeout)
 		timerC = timer.C
 	}
+	enqueue := func(toFlush []*message.Message) {
+		if len(toFlush) == 0 {
+			return
+		}
+		cp := make([]*message.Message, len(toFlush))
+		copy(cp, toFlush)
+		select {
+		case <-ctx.Done():
+			p.flushSinkBatch(ctx, sk, id, delivery, cp)
+		case writeCh <- writeJob{batch: cp}:
+		}
+	}
 	flush := func() {
 		if len(batch) == 0 {
 			return
 		}
-		for _, m := range batch {
-			_ = p.reserializeIfDirty(m, id)
-		}
-		err := p.writeWithRetry(ctx, sk, batch, delivery)
-		if err != nil {
-			p.deliverToDLQ(batch, err, id)
-		}
-		for _, m := range batch {
-			m.Ack(err)
-		}
+		enqueue(batch)
 		batch = batch[:0]
 		if timer != nil {
 			if !timer.Stop() {
@@ -506,6 +560,7 @@ func (p *Pipeline) runSink(ctx context.Context, id string, node *runtimeNode) {
 				timer.Stop()
 			}
 			flush()
+			close(writeCh)
 			return
 		case <-timerC:
 			flush()
@@ -515,6 +570,19 @@ func (p *Pipeline) runSink(ctx context.Context, id string, node *runtimeNode) {
 				flush()
 			}
 		}
+	}
+}
+
+func (p *Pipeline) flushSinkBatch(ctx context.Context, sk stage.Sink, id string, delivery *config.DeliverySpec, batch []*message.Message) {
+	for _, m := range batch {
+		_ = p.reserializeIfDirty(m, id)
+	}
+	err := p.writeWithRetry(ctx, sk, batch, delivery)
+	if err != nil {
+		p.deliverToDLQ(batch, err, id)
+	}
+	for _, m := range batch {
+		m.Ack(err)
 	}
 }
 
