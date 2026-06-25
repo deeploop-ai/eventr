@@ -75,7 +75,7 @@ steps:
       config: { url: https://us-api.example.com/orders }
 ```
 
-等价 HOCON、平坦 `stages[]` 兼容写法及分支路由见 [配置规范](docs/configurations.md)；设计背景见 [配置模型](eventr-design.md#8-配置模型)。
+等价 HOCON、平坦 `pipeline[]` 兼容写法及分支路由见 [配置规范](docs/configurations.md)；设计背景见 [配置模型](eventr-design.md#8-配置模型)。
 
 ## 仓库结构
 

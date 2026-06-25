@@ -153,8 +153,8 @@ func NormalizeSteps(cfg *PipelineConfig) ([]StageConfig, []EdgeConfig, error) {
 	if len(cfg.Steps) == 0 {
 		return nil, nil, fmt.Errorf("steps is empty")
 	}
-	if len(cfg.Stages) > 0 {
-		return nil, nil, fmt.Errorf("steps and stages are mutually exclusive")
+	if len(cfg.Pipeline) > 0 {
+		return nil, nil, fmt.Errorf("steps and pipeline are mutually exclusive")
 	}
 
 	var stages []StageConfig
@@ -220,22 +220,22 @@ func firstStageID(stepName string, step StepConfig) string {
 	return stepName
 }
 
-func NormalizeStages(cfg *PipelineConfig) ([]StageConfig, []EdgeConfig, error) {
-	if len(cfg.Stages) == 0 {
-		return nil, nil, fmt.Errorf("stages is empty")
+func NormalizePipeline(cfg *PipelineConfig) ([]StageConfig, []EdgeConfig, error) {
+	if len(cfg.Pipeline) == 0 {
+		return nil, nil, fmt.Errorf("pipeline is empty")
 	}
 	if len(cfg.Steps) > 0 {
-		return nil, nil, fmt.Errorf("steps and stages are mutually exclusive")
+		return nil, nil, fmt.Errorf("steps and pipeline are mutually exclusive")
 	}
 	var edges []EdgeConfig
-	for _, st := range cfg.Stages {
+	for _, st := range cfg.Pipeline {
 		depEdges, err := ExpandDependsOn(st.ID, st.DependsOn, cfg.EdgeDefaults)
 		if err != nil {
 			return nil, nil, err
 		}
 		edges = append(edges, depEdges...)
 	}
-	return cfg.Stages, edges, nil
+	return cfg.Pipeline, edges, nil
 }
 
 func MergeDeprecatedEdges(edges []EdgeConfig, deprecated []EdgeConfig) ([]EdgeConfig, []string) {
@@ -272,10 +272,10 @@ func BuildTopologyIR(cfg *PipelineConfig) (*topologyBuildResult, error) {
 	switch {
 	case len(cfg.Steps) > 0:
 		stages, edges, err = NormalizeSteps(cfg)
-	case len(cfg.Stages) > 0:
-		stages, edges, err = NormalizeStages(cfg)
+	case len(cfg.Pipeline) > 0:
+		stages, edges, err = NormalizePipeline(cfg)
 	default:
-		return nil, fmt.Errorf("pipeline must define steps or stages")
+		return nil, fmt.Errorf("config must define steps or pipeline")
 	}
 	if err != nil {
 		return nil, err

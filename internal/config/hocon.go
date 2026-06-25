@@ -109,12 +109,12 @@ func mapToPipelineConfig(tree map[string]any) (*PipelineConfig, error) {
 		}
 		cfg.Steps = steps
 	}
-	if v, ok := tree["stages"].([]any); ok {
-		stages, err := mapStages(v)
+	if v, ok := tree["pipeline"].([]any); ok {
+		stages, err := mapPipelineStages(v)
 		if err != nil {
 			return nil, err
 		}
-		cfg.Stages = stages
+		cfg.Pipeline = stages
 	}
 	if v, ok := tree["codecs"].([]any); ok {
 		cfg.Codecs = mapCodecs(v)
@@ -227,12 +227,12 @@ func mapSinkBlock(m map[string]any) *SinkBlock {
 	}
 }
 
-func mapStages(items []any) ([]StageConfig, error) {
+func mapPipelineStages(items []any) ([]StageConfig, error) {
 	out := make([]StageConfig, 0, len(items))
 	for i, raw := range items {
 		m, ok := raw.(map[string]any)
 		if !ok {
-			return nil, fmt.Errorf("stages[%d] is not an object", i)
+			return nil, fmt.Errorf("pipeline[%d] is not an object", i)
 		}
 		st := StageConfig{
 			ID:          strVal(m["id"]),

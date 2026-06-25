@@ -258,7 +258,7 @@ input {
 **竞品做法：** Envelope 和 Vector 都把边声明**内联到子节点**——Envelope 用 `dependencies = [a, b]`，Vector 用 `inputs = [a, b]`。无条件的线性/fan-in 场景无需单独 `edges:` 段：
 
 ```yaml
-stages:
+pipeline:
   - id: enrich
     depends_on: [kafka-source]        # 内联边，等价于 edges: [{from: kafka-source, to: enrich}]
   - id: splitter
@@ -414,7 +414,7 @@ type StageIR struct {
 对应的 YAML 简化示例（线性场景，用 `depends_on` 语法糖，无需 `edges:` 段）：
 
 ```yaml
-stages:
+pipeline:
   - id: kafka-source
     type: source
     plugin: kafka

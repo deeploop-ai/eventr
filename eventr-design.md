@@ -362,7 +362,7 @@ steps:
       config: { topic: orders-out }
 ```
 
-> 平坦 `stages[]` 等价写法见 §8.8；codec `ref` 规则对两种形态相同。
+> 平坦 `pipeline[]` 等价写法见 §8.8；codec `ref` 规则对两种形态相同。
 
 **同时支持 inline 声明**（简单 codec 无需 ref）：
 
@@ -928,7 +928,7 @@ DSL 字符串 → eql Parser（赋值语句 + CEL 表达式）
 |--------|----------|------|
 | 全局默认 | `engine.error_mode` | 所有 transform 与边 condition 的默认值 |
 | Pipeline 覆盖 | `engine.error_mode`（pipeline `spec.engine` 内） | 单 pipeline 覆盖 |
-| Transform 覆盖 | `steps.*.transform.error_mode` 或 `stages[].error_mode` | 仅该 transform 的 DSL 求值（含 filter/map） |
+| Transform 覆盖 | `steps.*.transform.error_mode` 或 `pipeline[].error_mode` | 仅该 transform 的 DSL 求值（含 filter/map） |
 
 | 值 | 行为 |
 |---|---|
@@ -1020,14 +1020,14 @@ steps:
 
 | 字段 | 含义 | 出现位置 |
 |------|------|----------|
-| **`type`** | 组件实现名（`kafka`、`map`、`http`…） | `steps.*.source/transform/sink`；平坦 `stages[]` |
-| **`kind`** | Stage 角色（`source` / `transform` / `sink`） | 仅平坦 `stages[]`（`steps` 子块由块名隐含角色） |
+| **`type`** | 组件实现名（`kafka`、`map`、`http`…） | `steps.*.source/transform/sink`；平坦 `pipeline[]` |
+| **`kind`** | Stage 角色（`source` / `transform` / `sink`） | 仅平坦 `pipeline[]`（`steps` 子块由块名隐含角色） |
 
 加载器校验：`type` 须在注册表中存在，且与 `kind`（或子块角色）匹配。Go `Stage` 接口用 `Kind()` / `ComponentType()` 对应配置 `kind` / `type`，避免与 `Type()` 混淆。
 
 #### 8.1.3 `depends_on`：唯一边配置语法
 
-`depends_on` 是 **steps 模式与平坦 stages 模式共用的边声明**，加载后展开为 `[]EdgeIR`。
+`depends_on` 是 **steps 模式与平坦 pipeline 模式共用的边声明**，加载后展开为 `[]EdgeIR`。
 
 **值形态（二选一，不可混用顶层形态）：**
 
@@ -1326,7 +1326,7 @@ steps {
 | 形态 | 适用 | 说明 |
 |------|------|------|
 | **`steps.{name}` 嵌套块**（上例） | 推荐；对齐 Envelope 布局 | 一个 step 可合体 `transform` + `sink` |
-| **`stages[]` 平坦列表**（§8.8） | 简单管道、与早期草案兼容 | 每行一个 stage，`kind` + `type` + `depends_on` |
+| **`pipeline[]` 平坦列表**（§8.8） | 简单管道、与早期草案兼容 | 每行一个 stage，`kind` + `type` + `depends_on` |
 
 两种形态经加载器展开后生成相同的 `TopologyIR`。
 
@@ -1417,7 +1417,7 @@ steps {
 }
 ```
 
-> 分支 DAG、per-edge buffer/delivery 见 §8.4。平坦 `stages[]` 兼容写法见 §8.8。
+> 分支 DAG、per-edge buffer/delivery 见 §8.4。平坦 `pipeline[]` 兼容写法见 §8.8。
 
 ### 8.4 场景二：分支 DAG（扩展 `depends_on`）
 
@@ -1589,7 +1589,7 @@ type DLQConfig struct {
 | `steps.{name}.source` only | `StageIR{id=name, kind=source, ...}` |
 | `steps.{name}.transform`（无 sink） | `StageIR{id=name, kind=transform, ...}` |
 | `steps.{name}.transform` + `sink` | transform stage + `{name}-sink` sink stage + 内边 `{name}→{name}-sink` |
-| 平坦 `stages[]` | 映射 `StageIR`；`depends_on` 同上展开 |
+| 平坦 `pipeline[]` | 映射 `StageIR`；`depends_on` 同上展开 |
 | 遗留 `edges[]`（deprecated） | 合并入 `EdgeIR`；同 `(from,to)` 时 `edges` 覆盖 `depends_on` |
 | `sink.config.parameter.*` | 剥前缀写入 sink `config` |
 
@@ -1623,7 +1623,7 @@ steps.enrich.sink       → StageIR id=enrich-sink, kind=sink
   substitution 解析（${ENV}、${path}、${?optional}）
         │
         ▼
-  steps / stages 规范化
+  steps / pipeline 规范化
         │
         ▼
   depends_on 展开 → []EdgeIR（应用 edgeDefaults；route→condition）
@@ -1647,7 +1647,7 @@ steps.enrich.sink       → StageIR id=enrich-sink, kind=sink
   TopologyIR → 传给 Topology Layer 构建执行图
 ```
 
-### 8.8 平坦 `stages[]` 写法（兼容）
+### 8.8 平坦 `pipeline[]` 写法（兼容）
 
 与 `steps` **二选一**；展开后与 §8.3 线性示例生成相同 `TopologyIR`。适合极简管道或迁移早期草案。
 
@@ -1657,7 +1657,7 @@ kind: Pipeline
 metadata:
   name: order-processing
 
-stages:
+pipeline:
   - id: kafka-source
     kind: source
     type: kafka
@@ -1698,7 +1698,7 @@ stages:
 
 **与 `steps` 的字段对应：**
 
-| `stages[]` | `steps` |
+| `pipeline[]` | `steps` |
 |------------|---------|
 | `id` | step 名（map key） |
 | `kind: source` | `source:` 子块 |
@@ -1797,7 +1797,7 @@ steps:
           algorithm: aes-256-gcm
 ```
 
-> 平坦 `stages[]` 写法见 §8.8。
+> 平坦 `pipeline[]` 写法见 §8.8。
 
 **接口契约：**
 - payload `[]byte` 直传 WASM 线性内存；
@@ -2227,7 +2227,7 @@ v2 增加 `eventr eql`（CEL/eql REPL）、`eventr lint`（配置 lint）。
 | C1 | `depends_on` 为唯一边语法；`edges:` 标记 deprecated | [x] | §8.1.3 |
 | C2 | `depends_on` 序列/映射二形态 normative 定义 | [x] | §8.1.3、§8.6 |
 | C3 | 主示例全部以 `steps` 为推荐写法 | [x] | §5.2、§8.2.5、§8.3、§8.4、§9.5 |
-| C4 | `stages[]` 仅作兼容附录（§8.8），与 `steps` 互斥 | [x] | §8.2.7、§8.8 |
+| C4 | `pipeline[]` 仅作兼容附录（§8.8），与 `steps` 互斥 | [x] | §8.2.7、§8.8 |
 | C5 | YAML + HOCON 双格式、Canonical Schema 字段对齐 | [x] | §8.2 |
 | C6 | 合体 step（transform+sink）展开规则与内边命名 `{name}-sink` | [x] | §8.6 |
 | C7 | substitution（`${ENV}`、`${path}`、`${?opt}`）行为写清 | [x] | §8.2.4 |

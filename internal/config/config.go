@@ -8,7 +8,7 @@ type PipelineConfig struct {
 	Metadata      map[string]string `yaml:"metadata"`
 	Engine        EngineConfig      `yaml:"engine"`
 	Steps         map[string]StepConfig `yaml:"steps"`
-	Stages        []StageConfig     `yaml:"stages"`
+	Pipeline      []StageConfig     `yaml:"pipeline"`
 	Codecs        []CodecConfig     `yaml:"codecs"`
 	EdgeDefaults  EdgeAttrs         `yaml:"edgeDefaults"`
 	DLQ           *DLQConfig        `yaml:"dlq"`

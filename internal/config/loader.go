@@ -107,8 +107,8 @@ func substituteInConfig(cfg *PipelineConfig) {
 		step = substituteStep(step)
 		cfg.Steps[name] = step
 	}
-	for i, st := range cfg.Stages {
-		cfg.Stages[i] = substituteStage(st)
+	for i, st := range cfg.Pipeline {
+		cfg.Pipeline[i] = substituteStage(st)
 	}
 }
 

@@ -15,7 +15,7 @@
 - [Codec](#codec)
 - [边（depends_on）](#边depends_on)
 - [Pipeline 顶层](#pipeline-顶层)
-- [平坦 stages 写法](#平坦-stages-写法)
+- [平坦 pipeline 写法](#平坦-pipeline-写法)
 - [变量替换](#变量替换)
 - [配置校验](#配置校验)
 - [格式与 CLI](#格式与-cli)
@@ -649,7 +649,7 @@ edges:
 
 ---
 
-## 平坦 stages 写法
+## 平坦 pipeline 写法
 
 与 `steps` **二选一**；适合极简管道或早期草案迁移。每行一个 stage，需显式声明 `kind` 与 `type`。
 
@@ -659,7 +659,7 @@ kind: Pipeline
 metadata:
   name: order-processing
 
-stages:
+pipeline:
   - id: kafka-source
     kind: source
     type: kafka

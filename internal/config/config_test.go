@@ -38,6 +38,42 @@ func TestLinearYAML_Validate(t *testing.T) {
 	}
 }
 
+func TestFlatPipelineYAML_Validate(t *testing.T) {
+	cfg := &config.PipelineConfig{
+		Metadata: map[string]string{"name": "flat-pipeline"},
+		Pipeline: []config.StageConfig{
+			{ID: "in", Kind: "source", Type: "cron", Config: map[string]any{"schedule": "0 */1 * * * *"}},
+			{ID: "enrich", Kind: "transform", Type: "map", DependsOn: config.DependsOnList{{Upstream: "in"}}, Config: map[string]any{"dsl": "payload.x = 1"}},
+			{ID: "out", Kind: "sink", Type: "drop", DependsOn: config.DependsOnList{{Upstream: "enrich"}}},
+		},
+	}
+	ir, err := topology.FromConfig(cfg)
+	if err != nil {
+		t.Fatalf("topology: %v", err)
+	}
+	if len(ir.Stages) != 3 {
+		t.Fatalf("stages = %d, want 3", len(ir.Stages))
+	}
+	if len(ir.Edges) != 2 {
+		t.Fatalf("edges = %d, want 2", len(ir.Edges))
+	}
+}
+
+func TestStepsAndPipelineMutuallyExclusive(t *testing.T) {
+	cfg := &config.PipelineConfig{
+		Steps: map[string]config.StepConfig{
+			"in": {Source: &config.SourceBlock{Type: "cron"}},
+		},
+		Pipeline: []config.StageConfig{
+			{ID: "out", Kind: "sink", Type: "drop"},
+		},
+	}
+	_, err := topology.FromConfig(cfg)
+	if err == nil {
+		t.Fatal("expected error for steps and pipeline together")
+	}
+}
+
 func TestDependsOnMap_ExpandRoute(t *testing.T) {
 	cfg := &config.PipelineConfig{
 		Metadata: map[string]string{"name": "route-test"},
