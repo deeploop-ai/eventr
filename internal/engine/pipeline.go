@@ -195,13 +195,17 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	// 4. Flush all sinks (write remaining batches)
+	// 4. Close edge buffers (fsync disk WAL)
+	for _, eb := range p.graph.allEdgeInbounds() {
+		_ = eb.Close()
+	}
+	// 5. Flush all sinks (write remaining batches)
 	for _, st := range p.stages {
 		if sk, ok := st.(stage.Sink); ok {
 			_ = sk.Flush(ctx)
 		}
 	}
-	// 5. Stop all remaining stages (transforms + sinks)
+	// 6. Stop all remaining stages (transforms + sinks)
 	for _, st := range p.stages {
 		if _, ok := st.(stage.Source); ok {
 			continue // sources already stopped
@@ -212,27 +216,30 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 }
 
 func (p *Pipeline) startTransformFanIn(ctx context.Context, node *runtimeNode) {
-	p.stageWG.Add(1)
-	go func() {
-		defer p.stageWG.Done()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case msg, ok := <-node.inbound:
-				if !ok {
-					return
-				}
-				batch := []*message.Message{msg}
+	for _, eb := range node.inboundEdges {
+		eb := eb
+		p.stageWG.Add(1)
+		go func() {
+			defer p.stageWG.Done()
+			for {
 				select {
 				case <-ctx.Done():
-					msg.Ack(ctx.Err())
 					return
-				case node.batchIn <- batch:
+				case msg, ok := <-eb.Out():
+					if !ok {
+						return
+					}
+					batch := []*message.Message{msg}
+					select {
+					case <-ctx.Done():
+						msg.Ack(ctx.Err())
+						return
+					case node.batchIn <- batch:
+					}
 				}
 			}
-		}
-	}()
+		}()
+	}
 }
 
 func (p *Pipeline) run(ctx context.Context) {
@@ -241,6 +248,10 @@ func (p *Pipeline) run(ctx context.Context) {
 			_ = r
 		}
 	}()
+
+	for _, eb := range p.graph.allEdgeInbounds() {
+		eb.Start(ctx)
+	}
 
 	for id, node := range p.graph.nodes {
 		if node.kind == topology.KindTransform {
@@ -415,9 +426,7 @@ func (p *Pipeline) dispatchFrom(ctx context.Context, fromID string, msg *message
 				msg.Ack(ackErr)
 			}
 		})
-		node := p.graph.nodes[edge.To]
-		strategy := edge.BufferStrategy()
-		p.sendToInbound(ctx, node.inbound, child, strategy, edge.From, edge.To)
+		p.sendToInbound(ctx, edge, child)
 	}
 }
 
@@ -527,6 +536,23 @@ func (p *Pipeline) runSink(ctx context.Context, id string, node *runtimeNode) {
 	}
 	delivery := p.findDeliveryForStage(id)
 
+	ingress := make(chan *message.Message, node.outBuffer)
+	for _, eb := range node.inboundEdges {
+		eb := eb
+		p.stageWG.Add(1)
+		go func() {
+			defer p.stageWG.Done()
+			for msg := range eb.Out() {
+				select {
+				case <-ctx.Done():
+					msg.Ack(ctx.Err())
+					return
+				case ingress <- msg:
+				}
+			}
+		}()
+	}
+
 	type writeJob struct {
 		batch []*message.Message
 	}
@@ -596,7 +622,7 @@ func (p *Pipeline) runSink(ctx context.Context, id string, node *runtimeNode) {
 			return
 		case <-timerC:
 			flush()
-		case msg := <-node.inbound:
+		case msg := <-ingress:
 			batch = append(batch, msg)
 			if len(batch) >= batchSize {
 				flush()

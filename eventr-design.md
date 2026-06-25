@@ -2197,11 +2197,11 @@ v2 增加 `eventr eql`（CEL/eql REPL）、`eventr lint`（配置 lint）。
 - [x] `engine.max_inflight` 全 pipeline 在途消息背压
 - [x] `error_mode` 传播链（`propagate` / `ignore` / `silent`）
 
-#### Sprint 3：Edge Disk Buffer + 优雅停机加固
+#### Sprint 3：Edge Disk Buffer + 优雅停机加固 — **已完成**
 
-- [ ] WAL segment 格式 + 崩溃恢复
-- [ ] memory → disk overflow
-- [ ] 周期性 fsync；停机顺序复核（Source → drain → Flush → Stop）
+- [x] WAL segment 格式 + 崩溃恢复
+- [x] memory → disk overflow
+- [x] 周期性 fsync；停机顺序复核（Source → drain → Flush → Stop）
 
 #### Sprint 4：热加载 + 代码质量 + 测试补强
 
@@ -2211,7 +2211,7 @@ v2 增加 `eventr eql`（CEL/eql REPL）、`eventr lint`（配置 lint）。
 
 ### 阶段 2：生产就绪（v2.0）
 
-- [ ] Edge disk buffer + overflow（Sprint 3 提前部分落地则标记完成）
+- [x] Edge disk buffer + overflow（Sprint 3）
 - [ ] 其余 P0 组件（grpc_server source、grpc/log sink）
 - [x] Sink max_in_flight + ordering（基础实现已完成）
 - [x] retry + DLQ（边 `delivery` + pipeline `dlq` fallback 链；确定性/瞬时错误分类待细化）

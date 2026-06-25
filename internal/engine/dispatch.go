@@ -2,10 +2,12 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"sync/atomic"
 
 	"github.com/deeploop-ai/eventr/internal/eql"
 	"github.com/deeploop-ai/eventr/internal/message"
+	"github.com/deeploop-ai/eventr/internal/topology"
 )
 
 type ackAggregator struct {
@@ -76,56 +78,20 @@ func (p *Pipeline) dispatchTransformOutputs(ctx context.Context, stageID string,
 	}
 }
 
-func (p *Pipeline) sendToInbound(ctx context.Context, ch chan *message.Message, msg *message.Message, strategy, from, to string) {
-	dropped, reason := sendToInbound(ctx, ch, msg, strategy)
+func (p *Pipeline) sendToInbound(ctx context.Context, edge topology.EdgeIR, msg *message.Message) {
+	eb := p.graph.edgeInbounds[edgeKey(edge.From, edge.To)]
+	if eb == nil {
+		msg.Ack(fmt.Errorf("edge buffer %s->%s not found", edge.From, edge.To))
+		return
+	}
+	dropped, reason, _ := eb.Enqueue(ctx, msg)
 	if dropped && p.metrics != nil {
-		p.metrics.IncEdgeDropped(p.ir.Name, from, to, reason)
+		p.metrics.IncEdgeDropped(p.ir.Name, edge.From, edge.To, reason)
 	}
 	if p.metrics != nil {
-		p.metrics.SetEdgeBuffer(p.ir.Name, from, to, len(ch))
+		size := eb.Len() + int(eb.DiskBytes())
+		p.metrics.SetEdgeBuffer(p.ir.Name, edge.From, edge.To, size)
 	}
-}
-
-func sendToInbound(ctx context.Context, ch chan *message.Message, msg *message.Message, strategy string) (dropped bool, reason string) {
-	switch strategy {
-	case "drop_newest":
-		select {
-		case <-ctx.Done():
-			msg.Ack(ctx.Err())
-		case ch <- msg:
-		default:
-			msg.Ack(nil)
-			return true, "drop_newest"
-		}
-	case "drop_oldest":
-		select {
-		case <-ctx.Done():
-			msg.Ack(ctx.Err())
-		case ch <- msg:
-		default:
-			select {
-			case old := <-ch:
-				old.Ack(nil)
-				reason = "drop_oldest"
-			default:
-			}
-			select {
-			case <-ctx.Done():
-				msg.Ack(ctx.Err())
-			case ch <- msg:
-			}
-			if reason != "" {
-				return true, reason
-			}
-		}
-	default:
-		select {
-		case <-ctx.Done():
-			msg.Ack(ctx.Err())
-		case ch <- msg:
-		}
-	}
-	return false, ""
 }
 
 func (p *Pipeline) evalCondition(ctx context.Context, prg *eql.Program, msg *message.Message) (bool, error) {

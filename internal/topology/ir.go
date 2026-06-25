@@ -67,6 +67,12 @@ func DefaultBuffer(cfg config.EdgeBufferConfig) config.EdgeBufferConfig {
 	if out.Strategy == "" {
 		out.Strategy = "block"
 	}
+	if out.DiskSyncInterval == "" {
+		out.DiskSyncInterval = "500ms"
+	}
+	if out.DiskMaxSize == 0 {
+		out.DiskMaxSize = 1 << 30
+	}
 	return out
 }
 

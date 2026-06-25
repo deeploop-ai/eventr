@@ -3,31 +3,39 @@ package engine
 import (
 	"fmt"
 
+	"github.com/deeploop-ai/eventr/internal/buffer"
 	"github.com/deeploop-ai/eventr/internal/eql"
 	"github.com/deeploop-ai/eventr/internal/message"
 	"github.com/deeploop-ai/eventr/internal/topology"
 )
 
 type runtimeNode struct {
-	id         string
-	kind       string
-	inbound    chan *message.Message
-	batchIn    chan []*message.Message
-	outBuffer  int
-	workers    int
-	conditions map[string]*eql.Program
-	predicate  *eql.Program
+	id           string
+	kind         string
+	inbound      chan *message.Message
+	inboundEdges []*buffer.EdgeInbound
+	batchIn      chan []*message.Message
+	outBuffer    int
+	workers      int
+	conditions   map[string]*eql.Program
+	predicate    *eql.Program
 }
 
 type runtimeGraph struct {
-	nodes    map[string]*runtimeNode
-	outgoing map[string][]topology.EdgeIR
+	nodes         map[string]*runtimeNode
+	outgoing      map[string][]topology.EdgeIR
+	edgeInbounds  map[string]*buffer.EdgeInbound
+}
+
+func edgeKey(from, to string) string {
+	return from + "->" + to
 }
 
 func buildRuntimeGraph(ir *topology.TopologyIR) (*runtimeGraph, error) {
 	g := &runtimeGraph{
-		nodes:    make(map[string]*runtimeNode),
-		outgoing: make(map[string][]topology.EdgeIR),
+		nodes:        make(map[string]*runtimeNode),
+		outgoing:     make(map[string][]topology.EdgeIR),
+		edgeInbounds: make(map[string]*buffer.EdgeInbound),
 	}
 
 	inboundBuf := make(map[string]int)
@@ -64,7 +72,21 @@ func buildRuntimeGraph(ir *topology.TopologyIR) (*runtimeGraph, error) {
 		}
 		g.nodes[st.ID] = node
 	}
+
 	for _, edge := range ir.Edges {
+		eb, err := buffer.NewEdgeInbound(buffer.EdgeOptions{
+			Pipeline: ir.Name,
+			From:     edge.From,
+			To:       edge.To,
+			Config:   edge.Buffer,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("edge %s->%s buffer: %w", edge.From, edge.To, err)
+		}
+		key := edgeKey(edge.From, edge.To)
+		g.edgeInbounds[key] = eb
+		g.nodes[edge.To].inboundEdges = append(g.nodes[edge.To].inboundEdges, eb)
+
 		g.outgoing[edge.From] = append(g.outgoing[edge.From], edge)
 		if edge.Condition != "" {
 			prg, err := eql.CompileCondition(edge.Condition)
@@ -110,3 +132,16 @@ func (m msgAdapter) SetParsedData(v any) {
 	m.Message.SetParsedData(v)
 }
 func (m msgAdapter) Metadata() map[string]any { return m.Message.Metadata }
+
+func (g *runtimeGraph) allEdgeInbounds() []*buffer.EdgeInbound {
+	out := make([]*buffer.EdgeInbound, 0, len(g.edgeInbounds))
+	seen := make(map[*buffer.EdgeInbound]bool)
+	for _, eb := range g.edgeInbounds {
+		if seen[eb] {
+			continue
+		}
+		seen[eb] = true
+		out = append(out, eb)
+	}
+	return out
+}

@@ -4,13 +4,35 @@ import (
 	"context"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/deeploop-ai/eventr/internal/buffer"
+	"github.com/deeploop-ai/eventr/internal/config"
 	"github.com/deeploop-ai/eventr/internal/message"
 	"github.com/deeploop-ai/eventr/internal/topology"
 )
 
+func setupTestEdge(t *testing.T, from, to string) *buffer.EdgeInbound {
+	t.Helper()
+	eb, err := buffer.NewEdgeInbound(buffer.EdgeOptions{
+		Pipeline: "test",
+		From:     from,
+		To:       to,
+		Config:   config.EdgeBufferConfig{Size: 4},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eb.Start(context.Background())
+	return eb
+}
+
 func TestDispatchTransformOutputs_AcksParentAfterChild(t *testing.T) {
-	p := &Pipeline{graph: &runtimeGraph{nodes: map[string]*runtimeNode{}}}
+	eb := setupTestEdge(t, "map", "sink")
+	p := &Pipeline{graph: &runtimeGraph{
+		nodes:        map[string]*runtimeNode{},
+		edgeInbounds: map[string]*buffer.EdgeInbound{edgeKey("map", "sink"): eb},
+	}}
 
 	var parentAcks atomic.Int32
 	parent := message.New([]byte(`{"x":1}`), nil)
@@ -22,8 +44,7 @@ func TestDispatchTransformOutputs_AcksParentAfterChild(t *testing.T) {
 	child := parent.ShallowCopy()
 	child.SetAckFn(nil)
 
-	sink := &runtimeNode{inbound: make(chan *message.Message, 1)}
-	p.graph.nodes["sink"] = sink
+	p.graph.nodes["sink"] = &runtimeNode{inboundEdges: []*buffer.EdgeInbound{eb}}
 	p.graph.outgoing = map[string][]topology.EdgeIR{
 		"map": {{From: "map", To: "sink"}},
 	}
@@ -31,9 +52,9 @@ func TestDispatchTransformOutputs_AcksParentAfterChild(t *testing.T) {
 	p.dispatchTransformOutputs(context.Background(), "map", []*message.Message{parent}, []*message.Message{child})
 
 	select {
-	case got := <-sink.inbound:
+	case got := <-eb.Out():
 		got.Ack(nil)
-	default:
+	case <-time.After(time.Second):
 		t.Fatal("expected child dispatched to sink")
 	}
 	if parentAcks.Load() != 1 {
@@ -59,7 +80,11 @@ func TestDispatchTransformOutputs_AcksDroppedInputs(t *testing.T) {
 }
 
 func TestDispatchTransformOutputs_PassThroughUsesExistingAck(t *testing.T) {
-	p := &Pipeline{graph: &runtimeGraph{nodes: map[string]*runtimeNode{}}}
+	eb := setupTestEdge(t, "filter", "sink")
+	p := &Pipeline{graph: &runtimeGraph{
+		nodes:        map[string]*runtimeNode{},
+		edgeInbounds: map[string]*buffer.EdgeInbound{edgeKey("filter", "sink"): eb},
+	}}
 	var acks atomic.Int32
 	msg := message.New(nil, nil)
 	msg.ID = "msg-1"
@@ -67,15 +92,14 @@ func TestDispatchTransformOutputs_PassThroughUsesExistingAck(t *testing.T) {
 		acks.Add(1)
 	})
 
-	sink := &runtimeNode{inbound: make(chan *message.Message, 1)}
-	p.graph.nodes["sink"] = sink
+	p.graph.nodes["sink"] = &runtimeNode{inboundEdges: []*buffer.EdgeInbound{eb}}
 	p.graph.outgoing = map[string][]topology.EdgeIR{
 		"filter": {{From: "filter", To: "sink"}},
 	}
 
 	p.dispatchTransformOutputs(context.Background(), "filter", []*message.Message{msg}, []*message.Message{msg})
 
-	got := <-sink.inbound
+	got := <-eb.Out()
 	if got == msg {
 		t.Fatal("dispatchFrom should fan-out a shallow copy")
 	}
@@ -86,8 +110,17 @@ func TestDispatchTransformOutputs_PassThroughUsesExistingAck(t *testing.T) {
 }
 
 func TestSendToInbound_DropNewest(t *testing.T) {
-	ch := make(chan *message.Message, 1)
-	ch <- message.New(nil, nil)
+	eb, err := buffer.NewEdgeInbound(buffer.EdgeOptions{
+		Pipeline: "test",
+		From:     "a",
+		To:       "b",
+		Config:   config.EdgeBufferConfig{Size: 1, Strategy: "drop_newest"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eb.Start(context.Background())
+	_, _, _ = eb.Enqueue(context.Background(), message.New(nil, nil))
 
 	var acks atomic.Int32
 	msg := message.New(nil, nil)
@@ -95,7 +128,10 @@ func TestSendToInbound_DropNewest(t *testing.T) {
 		acks.Add(1)
 	})
 
-	sendToInbound(context.Background(), ch, msg, "drop_newest")
+	dropped, reason, _ := eb.Enqueue(context.Background(), msg)
+	if !dropped || reason != "drop_newest" {
+		t.Fatalf("dropped=%v reason=%q", dropped, reason)
+	}
 	if acks.Load() != 1 {
 		t.Fatalf("expected dropped message to be acked")
 	}

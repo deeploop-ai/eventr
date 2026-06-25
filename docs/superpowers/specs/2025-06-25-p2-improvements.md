@@ -21,16 +21,16 @@ These are deferred improvements that don't block alpha functionality but should 
 - [x] Health endpoints: `/live` (liveness) + `/ready` (readiness with per-stage HealthCheck)
 - [x] Structured JSON logging with dynamic level adjustment
 
-### 2. Edge Disk Buffer (v2.0-beta)
+### 2. Edge Disk Buffer (v2.0-beta) — Sprint 3 done
 
 **Design ref:** §6.8
 
-- [ ] WAL format: `[msg_len(4B)][payload(msg_len)][meta_len(4B)][metadata(meta_len)]`
-- [ ] Segment files (64MB default)
-- [ ] Periodic fsync (500ms default)
-- [ ] Crash recovery: scan segments → rebuild queue
-- [ ] Overflow mode: memory → disk on backpressure
-- [ ] Offset tracking per segment
+- [x] WAL format: `[msg_len(4B)][payload(msg_len)][meta_len(4B)][metadata(meta_len)]`
+- [x] Segment files (64MB default)
+- [x] Periodic fsync (500ms default)
+- [x] Crash recovery: scan segments → rebuild queue
+- [x] Overflow mode: memory → disk on backpressure
+- [x] Offset tracking per segment
 
 ### 3. Hot Reload (v2.0-beta)
 
