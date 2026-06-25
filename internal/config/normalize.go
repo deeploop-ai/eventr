@@ -308,6 +308,30 @@ type topologyBuildResult struct {
 	DeprecationWarnings []string
 }
 
+func ApplyObservabilityDefaults(obs *ObservabilityConfig) {
+	if obs.Metrics.Port == 0 {
+		obs.Metrics.Port = 9090
+	}
+	if obs.Metrics.Path == "" {
+		obs.Metrics.Path = "/metrics"
+	}
+	if obs.Health.Port == 0 {
+		obs.Health.Port = 8080
+	}
+	if obs.Health.Liveness == "" {
+		obs.Health.Liveness = "/live"
+	}
+	if obs.Health.Readiness == "" {
+		obs.Health.Readiness = "/ready"
+	}
+	if obs.Logging.Level == "" {
+		obs.Logging.Level = "info"
+	}
+	if obs.Logging.Format == "" {
+		obs.Logging.Format = "json"
+	}
+}
+
 func ApplyEngineDefaults(engine *EngineConfig) {
 	if engine.MaxWorkers == 0 {
 		engine.MaxWorkers = 16

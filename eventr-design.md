@@ -2159,27 +2159,66 @@ v2 增加 `eventr eql`（CEL/eql REPL）、`eventr lint`（配置 lint）。
 
 ## 12. 开发路线图
 
+> **当前版本：** v2.0-alpha（核心引擎可运行）→ 进入 **v2.0-beta** 冲刺  
+> **详细执行计划：** `docs/superpowers/plans/2025-06-25-sprint1-observability.md`
+
 ### 阶段 1：核心引擎（v2.0-alpha）
 
-- [ ] 项目骨架（module、目录结构、Makefile）
-- [ ] Message 模型 + Stage（`Kind`/`ComponentType`）/ Edge / Codec 接口定义
-- [ ] Topology IR + YAML/HOCON 解析 + steps 规范化 + depends_on（含对象形态）展开 + 校验
-- [ ] Engine 核心：fanOut/fanIn、Edge Buffer（memory）、refCount Ack、COW、背压传播
-- [ ] eql DSL：CEL 集成（cel-go）+ 赋值扩展 + 函数注册 + 编译期检查
-- [ ] Codec 体系：json/raw + 顶层 codecs 配置 + 惰性 ParsedData
-- [ ] 3 个 Source（kafka/http_server/cron）+ 3 个 Sink（kafka/http/drop）+ 4 个 Transform（map/filter/route/wasm）
-- [ ] 多 Pipeline 运行时 + 档②隔离
-- [ ] Metrics（eventr_ 前缀）+ Tracing（OTLP）+ Health endpoints
-- [ ] CLI：run + validate
+- [x] 项目骨架（module、目录结构、Makefile）
+- [x] Message 模型 + Stage（`Kind`/`ComponentType`）/ Edge / Codec 接口定义
+- [x] Topology IR + YAML/HOCON 解析 + steps 规范化 + depends_on（含对象形态）展开 + 校验
+- [x] Engine 核心：fanOut/fanIn、Edge Buffer（memory）、refCount Ack、COW、背压传播
+- [x] eql DSL：CEL 集成（cel-go）+ 赋值扩展 + 函数注册 + 编译期检查（函数库待扩展）
+- [x] Codec 体系：json/raw + 顶层 codecs 配置 + 惰性 ParsedData
+- [x] 3 个 Source（kafka/http_server/cron）+ 3 个 Sink（kafka/http/drop）+ 3 个 Transform（map/filter/route）
+- [ ] WASM Transform（占位，推迟至 v2.0）
+- [x] 多 Pipeline 运行时（进程内隔离；`engine.max_workers`/`max_inflight` 待接线）
+- [x] Metrics（`eventr_` 前缀）+ Tracing（OTLP 骨架）+ Health endpoints
+- [x] CLI：run + validate
+
+### 阶段 1.5：v2.0-beta（当前冲刺，约 3–4 周）
+
+按 Sprint 顺序推进，每 Sprint 结束应产出可独立验证的增量。
+
+#### Sprint 1：可观测性基础（闭合 alpha 最后一项）— **已完成**
+
+- [x] Prometheus `eventr_*` 指标端点（`:9090/metrics`）
+  - Pipeline：`eventr_events_total`、`eventr_event_latency_seconds`、`eventr_inflight_events`
+  - Stage：`eventr_stage_duration_seconds`、`eventr_stage_errors_total`
+  - Edge：`eventr_edge_buffer_size`、`eventr_edge_dropped_total`
+  - DLQ：`eventr_dlq_enqueued_total`
+- [x] Health 端点：`/live`（存活）+ `/ready`（聚合 Stage `HealthCheck`）
+- [x] 结构化 JSON 日志（`slog`）+ 动态 level 调整（`PUT /debug/loglevel`）
+- [x] OTLP Tracing 接口骨架（pipeline → stage 粒度，noop 实现）
+
+#### Sprint 2：引擎级约束 + error_mode
+
+- [ ] `engine.max_workers` 全局 worker 池限制
+- [ ] `engine.max_inflight` 全 pipeline 在途消息背压
+- [ ] `error_mode` 传播链（`propagate` / `ignore` / `silent`）
+
+#### Sprint 3：Edge Disk Buffer + 优雅停机加固
+
+- [ ] WAL segment 格式 + 崩溃恢复
+- [ ] memory → disk overflow
+- [ ] 周期性 fsync；停机顺序复核（Source → drain → Flush → Stop）
+
+#### Sprint 4：热加载 + 代码质量 + 测试补强
+
+- [ ] Admin API：`POST /admin/reload/{pipeline}`、`SIGHUP`、409 并发保护
+- [ ] `msgAdapter` 去重；engine/topology 集成测试
+- [ ] CLI：`eventr test`（fixture 驱动）
 
 ### 阶段 2：生产就绪（v2.0）
 
-- [ ] Edge disk buffer + overflow
+- [ ] Edge disk buffer + overflow（Sprint 3 提前部分落地则标记完成）
 - [ ] 其余 P0 组件（grpc_server source、grpc/log sink）
-- [ ] Sink max_in_flight + ordering
-- [ ] retry + DLQ（确定性 vs 瞬时错误；边 `delivery` + pipeline `dlq` fallback 链）
-- [ ] 配置热加载（单 Pipeline graceful restart + admin API）
+- [x] Sink max_in_flight + ordering（基础实现已完成）
+- [x] retry + DLQ（边 `delivery` + pipeline `dlq` fallback 链；确定性/瞬时错误分类待细化）
+- [ ] 配置热加载（Sprint 4）
 - [ ] Notifications
+- [ ] WASM Transform（wazero）
+- [ ] PollingSource wrapper
 - [ ] 性能基准测试 + 压力测试
 
 ### 阶段 3：生态扩展（v2.1）

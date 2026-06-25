@@ -2,7 +2,7 @@
 
 Go 实现的 DAG 事件路由器（原 EventRouter v2）。以通用 `Message`（`[]byte` payload + metadata）为中心，通过 **Source → Transform → Sink** 有向无环图处理流式数据，支持条件路由、per-edge 缓冲与投递策略、重试/DLQ 与 at-least-once Ack。
 
-> **当前状态：** v2.0-alpha 实现中；核心引擎、配置加载、CLI 与 P0 插件（kafka/cron/http 等）已可构建运行，详见 [开发路线图](eventr-design.md#12-开发路线图)。
+> **当前状态：** v2.0-alpha 可观测性已闭合，进入 **v2.0-beta**（Sprint 2+）；详见 [开发路线图](eventr-design.md#12-开发路线图)。
 
 ## 特性概览
 

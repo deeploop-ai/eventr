@@ -30,6 +30,20 @@ type DLQConfig struct {
 
 type ObservabilityConfig struct {
 	Metrics MetricsConfig `yaml:"metrics"`
+	Health  HealthConfig  `yaml:"health"`
+	Logging LoggingConfig `yaml:"logging"`
+}
+
+type HealthConfig struct {
+	Enabled   bool   `yaml:"enabled"`
+	Port      int    `yaml:"port"`
+	Liveness  string `yaml:"liveness"`
+	Readiness string `yaml:"readiness"`
+}
+
+type LoggingConfig struct {
+	Level  string `yaml:"level"`
+	Format string `yaml:"format"`
 }
 
 type MetricsConfig struct {

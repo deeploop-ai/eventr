@@ -158,6 +158,20 @@ func mapObservability(m map[string]any) ObservabilityConfig {
 			Path:    strVal(metrics["path"]),
 		}
 	}
+	if health, ok := m["health"].(map[string]any); ok {
+		out.Health = HealthConfig{
+			Enabled:   boolVal(health["enabled"]),
+			Port:      intVal(health["port"]),
+			Liveness:  strVal(health["liveness"]),
+			Readiness: strVal(health["readiness"]),
+		}
+	}
+	if logging, ok := m["logging"].(map[string]any); ok {
+		out.Logging = LoggingConfig{
+			Level:  strVal(logging["level"]),
+			Format: strVal(logging["format"]),
+		}
+	}
 	return out
 }
 

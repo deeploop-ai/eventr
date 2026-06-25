@@ -48,6 +48,19 @@ func (m *Message) SetAckFn(fn func(error)) {
 	m.ackFn = fn
 }
 
+// WrapAckFn chains an additional ack handler before any existing handler.
+func (m *Message) WrapAckFn(extra func(error)) {
+	prev := m.ackFn
+	m.ackFn = func(err error) {
+		if extra != nil {
+			extra(err)
+		}
+		if prev != nil {
+			prev(err)
+		}
+	}
+}
+
 func (m *Message) Ack(err error) {
 	if m.ackFn != nil {
 		m.ackFn(err)

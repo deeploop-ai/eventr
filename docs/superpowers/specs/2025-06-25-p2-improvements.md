@@ -8,18 +8,18 @@
 
 These are deferred improvements that don't block alpha functionality but should be addressed before production readiness.
 
-### 1. Metrics & Observability (v2.0-beta)
+### 1. Metrics & Observability (v2.0-beta) — Sprint 1 done
 
 **Design ref:** §10.1–§10.7
 
-- [ ] Implement `eventr_*` Prometheus metrics endpoint (port 9090)
+- [x] Implement `eventr_*` Prometheus metrics endpoint (port 9090)
   - Pipeline: `eventr_events_total`, `eventr_event_latency_seconds`, `eventr_inflight_events`
   - Stage: `eventr_stage_duration_seconds`, `eventr_stage_errors_total`
   - Edge: `eventr_edge_buffer_size`, `eventr_edge_dropped_total`
   - DLQ: `eventr_dlq_enqueued_total`
-- [ ] OTLP tracing spans (pipeline → stage → edge granularity)
-- [ ] Health endpoints: `/live` (liveness) + `/ready` (readiness with per-stage HealthCheck)
-- [ ] Structured JSON logging with dynamic level adjustment
+- [x] OTLP tracing spans skeleton (pipeline → stage granularity; noop tracer)
+- [x] Health endpoints: `/live` (liveness) + `/ready` (readiness with per-stage HealthCheck)
+- [x] Structured JSON logging with dynamic level adjustment
 
 ### 2. Edge Disk Buffer (v2.0-beta)
 

@@ -12,6 +12,7 @@ func FromConfig(cfg *config.PipelineConfig) (*TopologyIR, error) {
 		return nil, err
 	}
 	config.ApplyEngineDefaults(&built.Engine)
+	config.ApplyObservabilityDefaults(&built.Observability)
 
 	ir := &TopologyIR{
 		Name:                built.Name,

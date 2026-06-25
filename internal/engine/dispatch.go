@@ -76,7 +76,17 @@ func (p *Pipeline) dispatchTransformOutputs(ctx context.Context, stageID string,
 	}
 }
 
-func sendToInbound(ctx context.Context, ch chan *message.Message, msg *message.Message, strategy string) {
+func (p *Pipeline) sendToInbound(ctx context.Context, ch chan *message.Message, msg *message.Message, strategy, from, to string) {
+	dropped, reason := sendToInbound(ctx, ch, msg, strategy)
+	if dropped && p.metrics != nil {
+		p.metrics.IncEdgeDropped(p.ir.Name, from, to, reason)
+	}
+	if p.metrics != nil {
+		p.metrics.SetEdgeBuffer(p.ir.Name, from, to, len(ch))
+	}
+}
+
+func sendToInbound(ctx context.Context, ch chan *message.Message, msg *message.Message, strategy string) (dropped bool, reason string) {
 	switch strategy {
 	case "drop_newest":
 		select {
@@ -85,6 +95,7 @@ func sendToInbound(ctx context.Context, ch chan *message.Message, msg *message.M
 		case ch <- msg:
 		default:
 			msg.Ack(nil)
+			return true, "drop_newest"
 		}
 	case "drop_oldest":
 		select {
@@ -95,12 +106,16 @@ func sendToInbound(ctx context.Context, ch chan *message.Message, msg *message.M
 			select {
 			case old := <-ch:
 				old.Ack(nil)
+				reason = "drop_oldest"
 			default:
 			}
 			select {
 			case <-ctx.Done():
 				msg.Ack(ctx.Err())
 			case ch <- msg:
+			}
+			if reason != "" {
+				return true, reason
 			}
 		}
 	default:
@@ -110,6 +125,7 @@ func sendToInbound(ctx context.Context, ch chan *message.Message, msg *message.M
 		case ch <- msg:
 		}
 	}
+	return false, ""
 }
 
 func (p *Pipeline) evalCondition(ctx context.Context, prg *eql.Program, msg *message.Message) (bool, error) {

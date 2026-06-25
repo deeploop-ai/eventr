@@ -11,6 +11,7 @@ import (
 	"github.com/deeploop-ai/eventr/internal/codec"
 	"github.com/deeploop-ai/eventr/internal/config"
 	"github.com/deeploop-ai/eventr/internal/message"
+	"github.com/deeploop-ai/eventr/internal/observability"
 	"github.com/deeploop-ai/eventr/internal/registry"
 	"github.com/deeploop-ai/eventr/internal/stage"
 	"github.com/deeploop-ai/eventr/internal/topology"
@@ -20,6 +21,7 @@ import (
 type Pipeline struct {
 	ir       *topology.TopologyIR
 	reg      *registry.Registry
+	metrics  *observability.Metrics
 	stages   map[string]stage.Stage
 	graph    *runtimeGraph
 	decoders map[string]codec.Codec // stage ID → decoder
@@ -30,10 +32,11 @@ type Pipeline struct {
 	started  atomic.Bool
 }
 
-func NewPipeline(ctx context.Context, reg *registry.Registry, ir *topology.TopologyIR) (*Pipeline, error) {
+func NewPipeline(ctx context.Context, reg *registry.Registry, ir *topology.TopologyIR, metrics *observability.Metrics) (*Pipeline, error) {
 	p := &Pipeline{
 		ir:       ir,
 		reg:      reg,
+		metrics:  metrics,
 		stages:   make(map[string]stage.Stage),
 		decoders: make(map[string]codec.Codec),
 		encoders: make(map[string]codec.Codec),
@@ -317,6 +320,7 @@ func (p *Pipeline) runSource(ctx context.Context, id string, node *runtimeNode) 
 					acking.OnAck(msg, err)
 				})
 			}
+			p.trackMessageLifecycle(msg)
 			p.dispatchFrom(ctx, id, msg)
 		}
 	}
@@ -394,8 +398,21 @@ func (p *Pipeline) dispatchFrom(ctx context.Context, fromID string, msg *message
 		})
 		node := p.graph.nodes[edge.To]
 		strategy := edge.BufferStrategy()
-		sendToInbound(ctx, node.inbound, child, strategy)
+		p.sendToInbound(ctx, node.inbound, child, strategy, edge.From, edge.To)
 	}
+}
+
+func (p *Pipeline) trackMessageLifecycle(msg *message.Message) {
+	if p.metrics == nil {
+		return
+	}
+	pipeline := p.ir.Name
+	start := time.Now()
+	p.metrics.IncInflight(pipeline)
+	msg.WrapAckFn(func(err error) {
+		p.metrics.DecInflight(pipeline)
+		p.metrics.RecordEvent(pipeline, observability.EventStatus(err), time.Since(start))
+	})
 }
 
 func (p *Pipeline) matchEdges(ctx context.Context, fromID string, edges []topology.EdgeIR, msg *message.Message) []topology.EdgeIR {
@@ -457,8 +474,15 @@ func (p *Pipeline) runTransform(ctx context.Context, id string, node *runtimeNod
 			if len(filtered) == 0 {
 				continue
 			}
+			start := time.Now()
 			out, err := tr.Process(ctx, filtered)
+			if p.metrics != nil {
+				p.metrics.ObserveStage(p.ir.Name, id, topology.KindTransform, time.Since(start))
+			}
 			if err != nil {
+				if p.metrics != nil {
+					p.metrics.IncStageError(p.ir.Name, id, "process")
+				}
 				for _, m := range filtered {
 					m.Ack(err)
 				}
@@ -574,12 +598,19 @@ func (p *Pipeline) runSink(ctx context.Context, id string, node *runtimeNode) {
 }
 
 func (p *Pipeline) flushSinkBatch(ctx context.Context, sk stage.Sink, id string, delivery *config.DeliverySpec, batch []*message.Message) {
+	start := time.Now()
 	for _, m := range batch {
 		_ = p.reserializeIfDirty(m, id)
 	}
 	err := p.writeWithRetry(ctx, sk, batch, delivery)
 	if err != nil {
+		if p.metrics != nil {
+			p.metrics.IncStageError(p.ir.Name, id, "write")
+		}
 		p.deliverToDLQ(batch, err, id)
+	}
+	if p.metrics != nil {
+		p.metrics.ObserveStage(p.ir.Name, id, topology.KindSink, time.Since(start))
 	}
 	for _, m := range batch {
 		m.Ack(err)
@@ -643,6 +674,9 @@ func (p *Pipeline) deliverToDLQ(batch []*message.Message, err error, sourceStage
 		// No DLQ configured — messages are dropped (already acked with error)
 		return
 	}
+	if p.metrics != nil {
+		p.metrics.IncDLQ(p.ir.Name, dlqSinkID, "sink_error")
+	}
 	dlqStage, ok := p.stages[dlqSinkID]
 	if !ok {
 		return
@@ -663,4 +697,16 @@ func (p *Pipeline) deliverToDLQ(batch []*message.Message, err error, sourceStage
 		dlqMsg.ID = uuid.NewString()
 		_ = dlqSink.Write(context.Background(), []*message.Message{dlqMsg})
 	}
+}
+
+func (p *Pipeline) Name() string {
+	return p.ir.Name
+}
+
+func (p *Pipeline) CheckStages(ctx context.Context) []observability.StageHealth {
+	out := make([]observability.StageHealth, 0, len(p.stages))
+	for id, st := range p.stages {
+		out = append(out, observability.CheckStage(p.ir.Name, id, st, ctx))
+	}
+	return out
 }

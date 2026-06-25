@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/deeploop-ai/eventr/internal/config"
 	"github.com/deeploop-ai/eventr/internal/engine"
+	"github.com/deeploop-ai/eventr/internal/observability"
 	"github.com/deeploop-ai/eventr/internal/registry"
 	"github.com/deeploop-ai/eventr/internal/topology"
 	_ "github.com/deeploop-ai/eventr/plugins/all"
@@ -65,6 +67,19 @@ func runCmd(args []string) {
 		}
 		fmt.Printf("loaded pipeline %q (%d stages, %d edges)\n", ir.Name, len(ir.Stages), len(ir.Edges))
 	}
+
+	obsCfg := observability.MergeObservability(cfgs)
+	if err := eng.StartObservability(ctx, obsCfg); err != nil {
+		fatal(err)
+	}
+	if obsCfg.Metrics.Enabled {
+		slog.Info("observability listening",
+			"metrics_port", obsCfg.Metrics.Port,
+			"metrics_path", obsCfg.Metrics.Path,
+			"health_port", obsCfg.Health.Port,
+		)
+	}
+
 	if err := eng.Start(ctx); err != nil {
 		fatal(err)
 	}
@@ -73,6 +88,7 @@ func runCmd(args []string) {
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer stopCancel()
 	_ = eng.Stop(stopCtx)
+	_ = eng.StopObservability(stopCtx)
 }
 
 func validateCmd(args []string) {
