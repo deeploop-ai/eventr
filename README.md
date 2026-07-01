@@ -16,6 +16,7 @@ A Go-based DAG event router (formerly EventRouter v2). Built around a generic `M
 | **Reliability** | Automatic backpressure propagation, refCount Ack, edge-level retry/DLQ, optional disk buffer |
 | **Observability** | `eventr_*` Prometheus metrics, OTLP tracing, health checks and notifications |
 | **Extensibility** | Go compile-time registration + WASM (wazero); gRPC out-of-process plugins planned for v2.1 |
+| **AI / Agent** | First-class `llm` / `embed` / `agent` transforms; pluggable LLM providers; DAG-native multi-agent orchestration — see [AI/Agent Guide](docs/ai-agent.md) |
 | **Deployment** | Single binary, multiple Pipelines + K8s Operator (shared engine) |
 | **Configuration** | **YAML** (CRD / CI) + **HOCON** (Envelope-style local config), parsed into a unified IR; see [Configuration Reference](docs/configurations.md) |
 
@@ -77,6 +78,36 @@ Branch routing is declared on downstream steps via `route` in `depends_on`:
       config: { url: https://us-api.example.com/orders }
 ```
 
+### AI-native event pipelines
+
+LLM classification + routing uses the same DAG model — no separate orchestration layer:
+
+```yaml
+  llm-classify:
+    depends_on: [kafka-in]
+    transform:
+      type: llm
+      config:
+        provider: openai
+        model: gpt-4o-mini
+        response_format: json
+        messages:
+          - role: user
+            content: "Classify: ${payload.body}"
+        result: { field: payload.category }
+
+  splitter:
+    depends_on: [llm-classify]
+    transform:
+      type: route
+      config:
+        routes:
+          billing: "payload.category == 'billing'"
+          support: "payload.category == 'support'"
+```
+
+See the [AI/Agent Guide](docs/ai-agent.md) for RAG ingest, tool-calling agents, and the phased roadmap.
+
 Equivalent HOCON, flat `pipeline[]` compatibility, and branch routing details are in the [Configuration Reference](docs/configurations.md); design background in the [Configuration Model](eventr-design.md#8-配置模型).
 
 ## Repository Layout
@@ -84,6 +115,7 @@ Equivalent HOCON, flat `pipeline[]` compatibility, and branch routing details ar
 | Path | Description |
 |------|-------------|
 | [`docs/configurations.md`](docs/configurations.md) | **Configuration reference** (Engine / Steps / plugins / edges / variable substitution) |
+| [`docs/ai-agent.md`](docs/ai-agent.md) | **AI/Agent guide** (LLM transforms, providers, multi-agent DAG, roadmap) |
 | [`eventr-design.md`](eventr-design.md) | Requirements and design (primary document) |
 | [`competitor-research.md`](competitor-research.md) | Competitive analysis |
 | [`design-review.md`](design-review.md) | Design review (some entries outdated; primary doc takes precedence) |
@@ -111,6 +143,7 @@ make build test validate pipeline-test
 ## Documentation
 
 - [Configuration Reference](docs/configurations.md) — Engine, Steps, Source/Transform/Sink plugins, edges, and variable substitution (Envelope-style layout)
+- [AI/Agent Guide](docs/ai-agent.md) — LLM/Agent transforms, provider abstraction, observability, phased delivery plan
 - [Background & Goals](eventr-design.md#1-背景与目标)
 - [Core Interfaces & Message](eventr-design.md#4-核心接口与-message-模型)
 - [Engine Runtime](eventr-design.md#6-引擎运行时)

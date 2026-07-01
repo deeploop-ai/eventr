@@ -22,6 +22,8 @@
 12. [开发路线图](#12-开发路线图)
 13. [v2.0 定稿检查清单](#13-v20-定稿检查清单)
 
+> **AI/Agent** 作为 v2.1+ 关键特性，独立设计文档：[docs/ai-agent.md](docs/ai-agent.md)
+
 ---
 
 ## 1. 背景与目标
@@ -1746,6 +1748,9 @@ pull 源（S3/SQS/CDC）实现 `PollingSource` 接口，引擎 wrapper 管定时
 | **P2** | `redact` | PII 脱敏 |
 | **P2** | `compress` / `decompress` | gzip/snappy/lz4 |
 | **P2** | `log` | 调试输出 |
+| **P1** | `llm` | 单轮 LLM 调用（chat / JSON mode）；OpenAI 兼容 + Ollama；eql 模板 prompt — 详见 [docs/ai-agent.md](docs/ai-agent.md) |
+| **P1** | `embed` | 文本 embedding；RAG 摄取管道 |
+| **P2** | `agent` | 多轮 Agent + tool calling + session；v2.2 |
 
 每个 Transform 可配 `predicate`（CEL 表达式），引擎在调 `Process` 前求值，false 则透传该消息（Kafka Connect 风格条件应用）。
 
@@ -1767,6 +1772,8 @@ pull 源（S3/SQS/CDC）实现 `PollingSource` 接口，引擎 wrapper 管定时
 | **P2** | `aws_s3` | 对象存储写入 |
 | **P2** | `bigquery` | 流式插入 |
 | **P2** | `websocket_client` | 实时推送 |
+| **P2** | `pgvector` / `qdrant` | RAG 向量写入（v2.2，与 embed transform 配合） |
+| **P2** | `langfuse` | LLM trace 导出（可选，与 OTLP 互补） |
 
 ### 9.4 Codec
 
@@ -1858,8 +1865,11 @@ plugins/
 | 阶段 | 内容 |
 |------|------|
 | **v2.0** | P0 全量 + WASM + Codec（json/raw） |
-| **v2.1** | P1 全量 + Codec（avro/protobuf/csv）+ 插件 SDK 文档 |
-| **v2.2** | P2 按需 + gRPC 插件 + per-partition ordering + 社区贡献指南 |
+| **v2.1** | P1 全量 + Codec（avro/protobuf/csv）+ 插件 SDK 文档 + **AI Phase A**（`llm`/`embed` transform、OpenAI/Ollama provider） |
+| **v2.2** | P2 按需 + gRPC 插件 + per-partition ordering + 社区贡献指南 + **AI Phase B**（`agent` transform、Bedrock/Vertex、向量 Sink） |
+| **v2.3+** | **AI Phase C**（MCP tool、`task` step、streaming LLM、Langfuse sink） |
+
+> AI/Agent 完整设计见 [docs/ai-agent.md](docs/ai-agent.md)；Phase A 实现计划见 [docs/superpowers/plans/2026-07-01-ai-agent-foundation.md](docs/superpowers/plans/2026-07-01-ai-agent-foundation.md)。
 
 ---
 
@@ -2228,6 +2238,14 @@ v2 增加 `eventr eql`（CEL/eql REPL）、`eventr lint`（配置 lint）。
 - [ ] Codec P1（avro/protobuf/csv）
 - [ ] gRPC 进程外插件
 - [ ] 插件 SDK 文档 + 示例
+- [ ] **AI Phase A** — `llm` / `embed` transform、Provider 抽象、OpenAI/Ollama adapter、eql 模板、LLM 指标（详见 [docs/ai-agent.md](docs/ai-agent.md)）
+
+### 阶段 3.5：AI/Agent 深化（v2.2）
+
+- [ ] **AI Phase B** — `agent` transform（tool loop、HTTP tool、session store）
+- [ ] Bedrock / Vertex provider adapter
+- [ ] 向量 Sink（pgvector 或 qdrant）
+- [ ] `eventr_agent_*` / `eventr_llm_*` 指标闭合
 
 ### 阶段 4：高级特性（v2.2+）
 
@@ -2239,6 +2257,7 @@ v2 增加 `eventr eql`（CEL/eql REPL）、`eventr lint`（配置 lint）。
 - [ ] 跨 Pipeline 事件路由（经由中间总线）
 - [ ] 社区贡献指南 + 管道可视化 UI
 - [ ] Schema Registry 集成
+- [ ] **AI Phase C** — MCP tool adapter、`task` step type、streaming LLM、Langfuse sink（详见 [docs/ai-agent.md](docs/ai-agent.md)）
 
 ---
 
