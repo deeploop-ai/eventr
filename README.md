@@ -88,7 +88,8 @@ steps:
 | [`cmd/eventr/`](cmd/eventr/) | CLI（`run` / `validate`） |
 | [`internal/`](internal/) | 引擎、配置、拓扑、eql |
 | [`plugins/`](plugins/) | Source / Transform / Sink / Codec 插件 |
-| [`testdata/pipelines/`](testdata/pipelines/) | 示例 YAML / HOCON 配置 |
+| [`_examples/`](_examples/) | 常用模式演示配置（线性 ETL、分支、fan-in、边策略等） |
+| [`testdata/pipelines/`](testdata/pipelines/) | CI / 单元测试用最小配置 |
 
 ## 构建与验证
 
