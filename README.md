@@ -1,35 +1,37 @@
 # EventR
 
-Go 实现的 DAG 事件路由器（原 EventRouter v2）。以通用 `Message`（`[]byte` payload + metadata）为中心，通过 **Source → Transform → Sink** 有向无环图处理流式数据，支持条件路由、per-edge 缓冲与投递策略、重试/DLQ 与 at-least-once Ack。
+English | [中文](README_ZH.md)
 
-> **当前状态：** v2.0-alpha 可观测性已闭合，进入 **v2.0-beta**（Sprint 2+）；详见 [开发路线图](eventr-design.md#12-开发路线图)。
+A Go-based DAG event router (formerly EventRouter v2). Built around a generic `Message` (`[]byte` payload + metadata), it processes streaming data through a **Source → Transform → Sink** directed acyclic graph, with conditional routing, per-edge buffering and delivery policies, retry/DLQ, and at-least-once Ack.
 
-## 特性概览
+> **Current status:** v2.0-alpha observability is complete; now in **v2.0-beta** (Sprint 2+). See the [development roadmap](eventr-design.md#12-开发路线图).
 
-| 能力 | 说明 |
-|------|------|
-| **DAG 拓扑** | 分支、fan-in/fan-out；边通过 `depends_on` 声明（含 `route` / `buffer` / `delivery`） |
-| **协议无关** | 引擎不解析 payload；编解码由 Codec 插件完成（Source `decoder` / Sink `encoder`） |
-| **eql** | CEL 表达式 + 赋值扩展（`payload.x = expr`、`del()`），用于 map / filter / 边 condition |
-| **可靠性** | 背压自动传播、refCount Ack、边级 retry/DLQ、可选 disk buffer |
-| **可观测性** | `eventr_*` Prometheus 指标、OTLP tracing、健康检查与通知 |
-| **扩展** | Go 编译时注册 + WASM（wazero）；v2.1 计划 gRPC 进程外插件 |
-| **部署** | 单二进制多 Pipeline + K8s Operator（共享同一引擎） |
-| **配置** | **YAML**（CRD / CI）+ **HOCON**（Envelope 风格本地配置），解析为统一 IR；详见 [配置规范](docs/configurations.md) |
+## Features
 
-## 架构
+| Capability | Description |
+|------------|-------------|
+| **DAG topology** | Branching, fan-in/fan-out; edges declared via `depends_on` (including `route` / `buffer` / `delivery`) |
+| **Protocol-agnostic** | The engine does not parse payloads; encoding/decoding is handled by Codec plugins (Source `decoder` / Sink `encoder`) |
+| **eql** | CEL expressions plus assignment extensions (`payload.x = expr`, `del()`) for map / filter / edge conditions |
+| **Reliability** | Automatic backpressure propagation, refCount Ack, edge-level retry/DLQ, optional disk buffer |
+| **Observability** | `eventr_*` Prometheus metrics, OTLP tracing, health checks and notifications |
+| **Extensibility** | Go compile-time registration + WASM (wazero); gRPC out-of-process plugins planned for v2.1 |
+| **Deployment** | Single binary, multiple Pipelines + K8s Operator (shared engine) |
+| **Configuration** | **YAML** (CRD / CI) + **HOCON** (Envelope-style local config), parsed into a unified IR; see [Configuration Reference](docs/configurations.md) |
+
+## Architecture
 
 ```
 YAML / HOCON / CRD  →  PipelineConfig  →  TopologyIR  →  Engine (fanOut/fanIn/Ack)
                               ↓
-                    Source / Transform / Sink / Codec 插件
+                    Source / Transform / Sink / Codec plugins
 ```
 
-**术语：** 配置层 **step**（`steps.{name}`）→ 运行时 **stage**（`StageIR`）→ **edge**（由 `depends_on` 展开）。
+**Terminology:** config-layer **step** (`steps.{name}`) → runtime **stage** (`StageIR`) → **edge** (expanded from `depends_on`).
 
-## 配置示例
+## Configuration Example
 
-推荐 `steps` 写法（YAML）：
+Recommended `steps` style (YAML):
 
 ```yaml
 apiVersion: eventr/v1
@@ -64,7 +66,7 @@ steps:
         topic: orders-enriched
 ```
 
-分支路由在下游 step 的 `depends_on` 中声明 `route`：
+Branch routing is declared on downstream steps via `route` in `depends_on`:
 
 ```yaml
   us-sink:
@@ -75,44 +77,51 @@ steps:
       config: { url: https://us-api.example.com/orders }
 ```
 
-等价 HOCON、平坦 `pipeline[]` 兼容写法及分支路由见 [配置规范](docs/configurations.md)；设计背景见 [配置模型](eventr-design.md#8-配置模型)。
+Equivalent HOCON, flat `pipeline[]` compatibility, and branch routing details are in the [Configuration Reference](docs/configurations.md); design background in the [Configuration Model](eventr-design.md#8-配置模型).
 
-## 仓库结构
+## Repository Layout
 
-| 路径 | 说明 |
-|------|------|
-| [`docs/configurations.md`](docs/configurations.md) | **配置规范**（Engine / Steps / 插件 / 边 / 变量替换） |
-| [`eventr-design.md`](eventr-design.md) | 需求与设计方案（主文档） |
-| [`competitor-research.md`](competitor-research.md) | 竞品调研 |
-| [`design-review.md`](design-review.md) | 设计评审（部分条目已过时，以主文档为准） |
-| [`cmd/eventr/`](cmd/eventr/) | CLI（`run` / `validate`） |
-| [`internal/`](internal/) | 引擎、配置、拓扑、eql |
-| [`plugins/`](plugins/) | Source / Transform / Sink / Codec 插件 |
-| [`_examples/`](_examples/) | 常用模式演示配置（线性 ETL、分支、fan-in、边策略等） |
-| [`testdata/pipelines/`](testdata/pipelines/) | CI / 单元测试用最小配置 |
+| Path | Description |
+|------|-------------|
+| [`docs/configurations.md`](docs/configurations.md) | **Configuration reference** (Engine / Steps / plugins / edges / variable substitution) |
+| [`eventr-design.md`](eventr-design.md) | Requirements and design (primary document) |
+| [`competitor-research.md`](competitor-research.md) | Competitive analysis |
+| [`design-review.md`](design-review.md) | Design review (some entries outdated; primary doc takes precedence) |
+| [`cmd/eventr/`](cmd/eventr/) | CLI (`run` / `validate` / `test`) |
+| [`internal/`](internal/) | Engine, config, topology, eql |
+| [`plugins/`](plugins/) | Source / Transform / Sink / Codec plugins |
+| [`_examples/`](_examples/) | Demo configs for common patterns (linear ETL, branching, fan-in, edge policies, etc.) |
+| [`testdata/pipelines/`](testdata/pipelines/) | Minimal configs for CI / unit tests |
 
-## 构建与验证
+## Build & Verify
 
 ```bash
 go test ./...
 go build -o bin/eventr ./cmd/eventr
 bin/eventr validate --config testdata/pipelines/linear.yaml
+bin/eventr test --dir testdata/tests
 ```
 
-## 文档
+Or use the Makefile:
 
-- [配置规范](docs/configurations.md) — Engine、Steps、Source/Transform/Sink 插件、边与变量替换（参考 Envelope 布局）
-- [背景与目标](eventr-design.md#1-背景与目标)
-- [核心接口与 Message](eventr-design.md#4-核心接口与-message-模型)
-- [引擎运行时](eventr-design.md#6-引擎运行时)
+```bash
+make build test validate pipeline-test
+```
+
+## Documentation
+
+- [Configuration Reference](docs/configurations.md) — Engine, Steps, Source/Transform/Sink plugins, edges, and variable substitution (Envelope-style layout)
+- [Background & Goals](eventr-design.md#1-背景与目标)
+- [Core Interfaces & Message](eventr-design.md#4-核心接口与-message-模型)
+- [Engine Runtime](eventr-design.md#6-引擎运行时)
 - [eql DSL](eventr-design.md#7-dsl-语言设计-eql)
-- [配置模型（设计）](eventr-design.md#8-配置模型)
-- [v2.0 定稿检查清单](eventr-design.md#13-v20-定稿检查清单)
+- [Configuration Model (Design)](eventr-design.md#8-配置模型)
+- [v2.0 Finalization Checklist](eventr-design.md#13-v20-定稿检查清单)
 
-## 与 v1 的关系
+## Relationship to v1
 
-eventr **不向后兼容** EventRouter v1。v1 为线性 `Input → Processor → Output` + CloudEvents 绑定；v2 从 DAG、通用 Message、CEL/eql、Codec 体系与双模式部署重新设计。
+eventr is **not** backward compatible with EventRouter v1. v1 used a linear `Input → Processor → Output` model with CloudEvents binding; v2 is a ground-up redesign with DAG topology, generic Message, CEL/eql, Codec system, and dual deployment modes.
 
 ## License
 
-待定（实现阶段确定）。
+TBD (to be determined during implementation).

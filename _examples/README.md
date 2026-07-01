@@ -75,5 +75,5 @@ publish:
 ## 相关文档
 
 - [配置规范](../docs/configurations.md)
-- [README 配置示例](../README.md#配置示例)
+- [README 配置示例](../README_ZH.md#配置示例)
 - [testdata/pipelines](../testdata/pipelines/) — CI 与单元测试用最小配置
