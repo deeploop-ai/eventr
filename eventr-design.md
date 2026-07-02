@@ -1865,11 +1865,11 @@ plugins/
 | 阶段 | 内容 |
 |------|------|
 | **v2.0** | P0 全量 + WASM + Codec（json/raw） |
-| **v2.1** | P1 全量 + Codec（avro/protobuf/csv）+ 插件 SDK 文档 + **AI Phase A**（`llm`/`embed` transform、OpenAI/Ollama provider） |
-| **v2.2** | P2 按需 + gRPC 插件 + per-partition ordering + 社区贡献指南 + **AI Phase B**（`agent` transform、Bedrock/Vertex、向量 Sink） |
-| **v2.3+** | **AI Phase C**（MCP tool、`task` step、streaming LLM、Langfuse sink） |
+| **v2.1** | P1 全量 + Codec（avro/protobuf/csv）+ 插件 SDK 文档 + **AI Phase 1–2**（Agent MCP/JSON CLI → 管道内 `llm`/`embed`） |
+| **v2.2** | P2 按需 + gRPC 插件 + per-partition ordering + 社区贡献指南 + **AI Phase 3**（管道内 `agent` transform、向量 Sink） |
+| **v2.3+** | **AI Phase 4**（MCP 双向、streaming LLM、`task` step） |
 
-> AI/Agent 完整设计见 [docs/ai-agent.md](docs/ai-agent.md)；Phase A 实现计划见 [docs/superpowers/plans/2026-07-01-ai-agent-foundation.md](docs/superpowers/plans/2026-07-01-ai-agent-foundation.md)。
+> AI/Agent 完整设计见 [docs/ai-agent.md](docs/ai-agent.md)；Phase 0 Skill 见 [skills/eventr/](skills/eventr/)；Phase 1 计划见 [docs/superpowers/plans/2026-07-01-agent-skill.md](docs/superpowers/plans/2026-07-01-agent-skill.md)。
 
 ---
 
@@ -2238,14 +2238,15 @@ v2 增加 `eventr eql`（CEL/eql REPL）、`eventr lint`（配置 lint）。
 - [ ] Codec P1（avro/protobuf/csv）
 - [ ] gRPC 进程外插件
 - [ ] 插件 SDK 文档 + 示例
-- [ ] **AI Phase A** — `llm` / `embed` transform、Provider 抽象、OpenAI/Ollama adapter、eql 模板、LLM 指标（详见 [docs/ai-agent.md](docs/ai-agent.md)）
+- [ ] **AI Phase 0** — Agent 调用 eventr：skills.sh Skill（`skills/eventr/`）、文档对齐（详见 [docs/ai-agent.md](docs/ai-agent.md)）
+- [ ] **AI Phase 1** — `plugins list`、`validate --format json`、MCP Server
 
-### 阶段 3.5：AI/Agent 深化（v2.2）
+### 阶段 3.5：AI/Agent（v2.0-beta → v2.2）
 
-- [ ] **AI Phase B** — `agent` transform（tool loop、HTTP tool、session store）
-- [ ] Bedrock / Vertex provider adapter
-- [ ] 向量 Sink（pgvector 或 qdrant）
-- [ ] `eventr_agent_*` / `eventr_llm_*` 指标闭合
+- [ ] **AI Phase 0** — skills.sh Skill + Agent 工作流文档（[skills/eventr/](skills/eventr/)）
+- [ ] **AI Phase 1** — 机器可读 CLI（JSON validate/plugins）+ MCP Server
+- [ ] **AI Phase 2** — 管道内 `llm` / `embed` transform（v2.1）
+- [ ] **AI Phase 3** — 管道内 `agent` transform、向量 Sink（v2.2）
 
 ### 阶段 4：高级特性（v2.2+）
 
@@ -2257,7 +2258,7 @@ v2 增加 `eventr eql`（CEL/eql REPL）、`eventr lint`（配置 lint）。
 - [ ] 跨 Pipeline 事件路由（经由中间总线）
 - [ ] 社区贡献指南 + 管道可视化 UI
 - [ ] Schema Registry 集成
-- [ ] **AI Phase C** — MCP tool adapter、`task` step type、streaming LLM、Langfuse sink（详见 [docs/ai-agent.md](docs/ai-agent.md)）
+- [ ] **AI Phase 4** — MCP 双向、streaming LLM、`task` step（详见 [docs/ai-agent.md](docs/ai-agent.md)）
 
 ---
 

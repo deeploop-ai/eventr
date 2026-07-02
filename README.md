@@ -16,7 +16,7 @@ A Go-based DAG event router (formerly EventRouter v2). Built around a generic `M
 | **Reliability** | Automatic backpressure propagation, refCount Ack, edge-level retry/DLQ, optional disk buffer |
 | **Observability** | `eventr_*` Prometheus metrics, OTLP tracing, health checks and notifications |
 | **Extensibility** | Go compile-time registration + WASM (wazero); gRPC out-of-process plugins planned for v2.1 |
-| **AI / Agent** | First-class `llm` / `embed` / `agent` transforms; pluggable LLM providers; DAG-native multi-agent orchestration — see [AI/Agent Guide](docs/ai-agent.md) |
+| **AI / Agent** | **Agent-first:** [skills.sh skill](skills/eventr/SKILL.md) (`npx skills add deeploop-ai/eventr@eventr`) + CLI/Admin API; in-pipeline `llm`/`agent` transforms planned v2.1+ — [AI/Agent Guide](docs/ai-agent.md) |
 | **Deployment** | Single binary, multiple Pipelines + K8s Operator (shared engine) |
 | **Configuration** | **YAML** (CRD / CI) + **HOCON** (Envelope-style local config), parsed into a unified IR; see [Configuration Reference](docs/configurations.md) |
 
@@ -78,35 +78,38 @@ Branch routing is declared on downstream steps via `route` in `depends_on`:
       config: { url: https://us-api.example.com/orders }
 ```
 
-### AI-native event pipelines
+### Agent-first AI integration
 
-LLM classification + routing uses the same DAG model — no separate orchestration layer:
+**Step 1** is letting AI agents *operate* eventr (write configs, validate, test, run) — not embedding LLM inside pipelines yet.
+
+The repo ships an [Agent Skill](skills/eventr/SKILL.md) compatible with [skills.sh](https://skills.sh/):
+
+```bash
+npx skills add deeploop-ai/eventr@eventr
+```
+
+It teaches agents the CLI workflow, plugin catalog, and `depends_on` patterns. Example agent loop:
+
+```bash
+eventr validate --config my-pipeline.yaml
+eventr test --config testdata/tests/my-suite.yaml
+eventr run --config my-pipeline.yaml
+```
+
+In-pipeline LLM classification (future `llm` transform + `route`) will build on the same DAG model — see [AI/Agent Guide](docs/ai-agent.md).
 
 ```yaml
+# Planned v2.1+ — not available yet
   llm-classify:
-    depends_on: [kafka-in]
     transform:
       type: llm
       config:
         provider: openai
         model: gpt-4o-mini
-        response_format: json
         messages:
           - role: user
             content: "Classify: ${payload.body}"
-        result: { field: payload.category }
-
-  splitter:
-    depends_on: [llm-classify]
-    transform:
-      type: route
-      config:
-        routes:
-          billing: "payload.category == 'billing'"
-          support: "payload.category == 'support'"
 ```
-
-See the [AI/Agent Guide](docs/ai-agent.md) for RAG ingest, tool-calling agents, and the phased roadmap.
 
 Equivalent HOCON, flat `pipeline[]` compatibility, and branch routing details are in the [Configuration Reference](docs/configurations.md); design background in the [Configuration Model](eventr-design.md#8-配置模型).
 
@@ -115,7 +118,9 @@ Equivalent HOCON, flat `pipeline[]` compatibility, and branch routing details ar
 | Path | Description |
 |------|-------------|
 | [`docs/configurations.md`](docs/configurations.md) | **Configuration reference** (Engine / Steps / plugins / edges / variable substitution) |
-| [`docs/ai-agent.md`](docs/ai-agent.md) | **AI/Agent guide** (LLM transforms, providers, multi-agent DAG, roadmap) |
+| [`docs/ai-agent.md`](docs/ai-agent.md) | **AI/Agent guide** (Agent Skill, MCP roadmap, in-pipeline LLM phases) |
+| [`skills/eventr/`](skills/eventr/) | **Agent Skill** ([skills.sh](https://skills.sh/deeploop-ai/eventr/eventr)) for pipeline authoring |
+| [`skills/README.md`](skills/README.md) | Skills catalog and install commands |
 | [`eventr-design.md`](eventr-design.md) | Requirements and design (primary document) |
 | [`competitor-research.md`](competitor-research.md) | Competitive analysis |
 | [`design-review.md`](design-review.md) | Design review (some entries outdated; primary doc takes precedence) |
@@ -144,6 +149,7 @@ make build test validate pipeline-test
 
 - [Configuration Reference](docs/configurations.md) — Engine, Steps, Source/Transform/Sink plugins, edges, and variable substitution (Envelope-style layout)
 - [AI/Agent Guide](docs/ai-agent.md) — LLM/Agent transforms, provider abstraction, observability, phased delivery plan
+- [Agent Skill (skills.sh)](skills/README.md) — install with `npx skills add deeploop-ai/eventr@eventr`
 - [Background & Goals](eventr-design.md#1-背景与目标)
 - [Core Interfaces & Message](eventr-design.md#4-核心接口与-message-模型)
 - [Engine Runtime](eventr-design.md#6-引擎运行时)

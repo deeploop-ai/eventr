@@ -1,76 +1,108 @@
 # AI / Agent 支持
 
-> 版本：v1.0-draft  
+> 版本：v1.1-draft  
 > 日期：2026-07-01  
-> 状态：规划阶段（v2.1 起分阶段落地）
+> 状态：Phase 0 进行中（Agent 调用 eventr）
 
-English summary in [README](../README.md#ai-native-event-pipelines).
+English summary in [README](../README.md#agent-first-ai-integration).
 
 ---
 
 ## 1. 定位与目标
 
-eventr 的核心是 **DAG 事件路由**——消息在 Source → Transform → Sink 之间流动，具备背压、重试、DLQ 与可观测性。AI/Agent 不是独立子系统，而是 **一等公民 Transform / Step 能力**，与 `map`、`route`、`enrich` 等同层集成。
+AI/Agent 支持分 **两个方向**，优先级明确：
 
-### 1.1 为什么 AI/Agent 是 eventr 的关键特性
+| 方向 | 含义 | 优先级 |
+|------|------|--------|
+| **Agent → eventr** | 外部 AI Agent（Cursor、Claude、自定义编排）**调用** eventr：写配置、校验、测试、运行、热加载 | **Phase 0（第一步）** |
+| **eventr → LLM** | Pipeline 内部的 `llm` / `embed` / `agent` Transform，在 DAG 里调用大模型 | Phase 2（v2.1+） |
 
-| 场景 | eventr 优势 |
-|------|-------------|
-| **实时 AI  enrichment** | Kafka/Webhook 事件 → LLM 分类/摘要 → 路由到不同 Sink |
-| **RAG 数据管道** | 事件触发分块 → embedding → 向量库写入，全链路 at-least-once |
-| **多 Agent 编排** | DAG 天然表达「分类 → 专家 Agent → 聚合」；`route` + 专用 pipeline 分支 |
-| **Human-in-the-loop** | HTTP Source 收用户输入 → Agent 推理 → HTTP Sink 回调；边级 retry/DLQ 保可靠 |
-| **可观测 AI 运维** | `eventr_*` 指标扩展 token/latency/cost；OTLP span 贯穿 LLM 调用 |
+**第一步的核心：** 让 Agent 能可靠地操作 eventr，而不是先在引擎里嵌 LLM。
 
-竞品参考：Redpanda Connect（原 Benthos）已提供 OpenAI/Bedrock/Ollama 等 16+ AI processor；eventr 以对等能力 + **eql 模板** + **DAG 编排** + **Ack 语义** 形成差异化。
+典型 Agent 工作流：
 
-### 1.2 设计原则
+```
+用户意图 → Agent 读 Skill → 选 _examples 模板 → 写 YAML
+         → eventr validate → eventr test → eventr run / admin reload
+```
 
-1. **引擎无 LLM 感知** — 引擎仍只调度 `Message`；LLM 调用封装在 Transform 插件内
-2. **Provider 可插拔** — OpenAI 兼容 API 为默认抽象；Ollama/Bedrock/Vertex 为独立 adapter
-3. **声明式配置** — prompt / model / tool 定义在 YAML/HOCON；动态部分用 eql 模板
-4. **与现有语义一致** — 错误走 `error_mode` + 边 `delivery` + pipeline `dlq`；慢调用受 `max_inflight` 背压
-5. **分阶段交付** — v2.1 LLM Transform → v2.2 Agent Transform → v2.3+ 编排与 MCP
+已交付 / 进行中的 Agent 入口：
+
+```bash
+npx skills add deeploop-ai/eventr@eventr
+```
+
+Browse: https://skills.sh/deeploop-ai/eventr/eventr
+
+| 入口 | 路径 | 状态 |
+|------|------|------|
+| **Agent Skill (skills.sh)** | [`skills/eventr/SKILL.md`](../skills/eventr/SKILL.md) | ✅ Phase 0 |
+| **CLI** | `eventr validate` / `test` / `run` | ✅ 已有 |
+| **Admin HTTP API** | `/admin/reload`、`/admin/pipelines` | ✅ 已有 |
+| **MCP Server** | `eventr mcp` 或独立 `eventr-mcp` | Phase 1b |
+| **JSON 输出** | `validate --format json` 等 | Phase 1b |
+
+### 1.1 为什么 Agent 调用是第一步
+
+| 原因 | 说明 |
+|------|------|
+| **立刻可用** | 不改动引擎核心；Skill + 文档即可让 Cursor Agent 写 pipeline |
+| **复利最大** | Agent 帮用户配 pipeline → 降低 eventr 使用门槛 → 生态飞轮 |
+| **与 LLM Transform 正交** | 外部 Agent 写配置；内部 `llm` transform 是运行时能力，可后做 |
+| **对标真实需求** | 开发者用 AI 助手搭数据管道，比「管道里调 GPT」更常见 |
+
+### 1.2 设计原则（Agent 侧）
+
+1. **CLI 优先** — Agent 通过可脚本化命令操作；HTTP Admin 仅在引擎已运行时
+2. **Skill 即契约** — `skills/eventr/` 发布到 skills.sh，固化术语、工作流、插件清单
+3. **校验先于运行** — Skill 强制 `validate` → `test` → `run` 顺序
+4. **机器可读输出** — Phase 1b 起 CLI/MCP 返回 JSON，便于 Agent 解析
+5. **文档分层** — Skill（操作手册）→ configurations.md（字段参考）→ eventr-design.md（语义）
+
+### 1.3 设计原则（Pipeline 内 LLM，Phase 2+）
+
+1. **引擎无 LLM 感知** — LLM 调用封装在 Transform 插件内
+2. **Provider 可插拔** — OpenAI 兼容 API 为默认抽象
+3. **声明式配置** — prompt 用 eql 模板；错误走现有 retry/DLQ 链
 
 ---
 
 ## 2. 架构概览
 
+### 2.1 Phase 0：Agent 调用 eventr（当前）
+
 ```
-                    ┌─────────────────────────────────────┐
-                    │           eventr Engine              │
-                    │  fanOut / fanIn / Ack / backpressure │
-                    └──────────────────┬──────────────────┘
-                                       │
-         ┌─────────────────────────────┼─────────────────────────────┐
-         │                             │                             │
-   ┌─────▼─────┐               ┌───────▼───────┐              ┌──────▼──────┐
-   │  Source   │               │  Transform    │              │    Sink     │
-   │ kafka/http│──────────────▶│ map / route   │─────────────▶│ kafka/http  │
-   └───────────┘               │ llm / agent   │              └─────────────┘
-                               │ embed         │
-                               └───────┬───────┘
-                                       │
-                               ┌───────▼───────┐
-                               │ Provider Layer │
-                               │ openai-compat │
-                               │ ollama/bedrock │
-                               └───────────────┘
+┌─────────────────────────────────────────────────────────┐
+│  Cursor / Claude / Custom Agent                          │
+│  reads skills/eventr/SKILL.md                            │
+└──────────────────────────┬──────────────────────────────┘
+                           │ shell / MCP (Phase 1b)
+                           ▼
+┌─────────────────────────────────────────────────────────┐
+│  eventr CLI                    Admin HTTP (运行中)        │
+│  validate · test · run         reload · pipelines · status│
+└──────────────────────────┬──────────────────────────────┘
+                           ▼
+┌─────────────────────────────────────────────────────────┐
+│  Config → TopologyIR → Engine → Plugins                  │
+└─────────────────────────────────────────────────────────┘
 ```
 
-**关键概念：**
+### 2.2 Phase 2+：eventr 内嵌 LLM（后续）
 
-| 概念 | 说明 |
-|------|------|
-| **LLM Transform** | 单轮 LLM 调用（chat / completion / JSON mode）；一条 Message 进 → 一条（或 split 多条）出 |
-| **Embed Transform** | 文本 → 向量；输出写入 payload 或 metadata，供下游向量 Sink 消费 |
-| **Agent Transform** | 多轮推理 + tool calling；会话状态存 metadata 或外部 store |
-| **Agent Pipeline** | 用 DAG 表达多 Agent：`classify (llm)` → `route` → 专家 branch → `fan-in` |
-| **Provider** | 统一 `Complete` / `Embed` / `Stream` 接口；各厂商 adapter 实现 |
+```
+Source → map/route → llm transform → embed → Sink
+                         │
+                   Provider Layer (OpenAI/Ollama/…)
+```
+
+Pipeline 内 LLM 的组件与配置详见 [§3](#3-pipeline-内-llm-组件phase-2)（原 Phase A/B/C，顺序后移）。
 
 ---
 
-## 3. 组件规划
+## 3. Pipeline 内 LLM 组件（Phase 2+）
+
+> 以下内容为 v2.1+ 规划；**不影响 Phase 0 交付**。Agent 通过 Skill 写 pipeline 时，暂不要使用未实现的 `llm`/`agent` transform type。
 
 ### 3.1 Transform：`llm`（P0，v2.1）
 
@@ -375,44 +407,57 @@ kafka → llm (router)─┼─► llm (support expert) ──► sink
 
 ## 8. 开发路线图
 
-与 [eventr-design.md §12](../eventr-design.md#12-开发路线图) 对齐，AI/Agent 作为 **阶段 3 并行轨** 与生态扩展交织推进。
+### Phase 0：Agent 调用 eventr（**当前，第一步**）
 
-### Phase A：LLM 基础（v2.1，约 3 周）
+| 任务 | 交付物 | 状态 |
+|------|--------|------|
+| 0.1 项目 Agent Skill（skills.sh） | `skills/eventr/SKILL.md` + `reference.md` + `skills/README.md` | ✅ |
+| 0.2 文档对齐 | 本文件、README、eventr-design §12 | ✅ |
+| 0.3 `_examples` 索引在 Skill 中可发现 | Skill reference 链接 | ✅ |
+| 0.4 Agent 工作流验收 | 用 Cursor Agent 完成：validate 示例 → 新建 cron pipeline → test | 待验收 |
 
-| 任务 | 交付物 |
-|------|--------|
-| A1 Provider 接口 + OpenAI adapter | `internal/llm/` |
-| A2 `llm` transform | `plugins/transform/llm/` |
-| A3 eql 模板解析（messages content） | `internal/eql/template.go` |
-| A4 指标 + tracing span | `internal/observability/` |
-| A5 `embed` transform + Ollama adapter | `plugins/transform/embed/` |
-| A6 示例 + 文档 | `_examples/09-*.yaml`、`docs/configurations.md` 更新 |
+**验收标准：** 未读源码的 Agent 仅凭 Skill 能完成「从模板创建 pipeline → validate 通过 → test 通过」。
 
-**验收：** `eventr test` 用 mock provider 跑通 classify pipeline；集成测试可选 `-tags=integration` 打真实 Ollama。
-
-### Phase B：Agent + 工具（v2.2，约 4 周）
+### Phase 1a：Agent 体验增强（v2.0-beta，约 1 周）
 
 | 任务 | 交付物 |
 |------|--------|
-| B1 `agent` transform + tool loop | `plugins/transform/agent/` |
-| B2 HTTP tool invoker | `internal/agent/tools/http.go` |
-| B3 Session store（memory + redis） | `internal/agent/session/` |
-| B4 Bedrock / Vertex adapter | `internal/llm/bedrock/`, `vertex/` |
-| B5 `eventr_agent_*` 指标 | observability |
-| B6 向量 Sink（pgvector 或 qdrant 二选一） | `plugins/sink/` |
+| 1a.1 `eventr plugins list` | 输出已注册 source/transform/sink/codec |
+| 1a.2 `eventr validate --format json` | 结构化错误（path、message、line）供 Agent 解析 |
+| 1a.3 `eventr doc --format dot` | 管道拓扑 DOT（设计文档已规划） |
+| 1a.4 Skill 更新 | 引用新 CLI 子命令 |
 
-**验收：** support-agent 示例，HTTP tool 调 mock server，session 跨 Message 复用。
+### Phase 1b：MCP Server（v2.0-beta，约 2 周）
 
-### Phase C：编排与生态（v2.3+）
+独立进程或 `eventr mcp`，暴露 Agent 工具：
 
-| 任务 | 说明 |
-|------|------|
-| C1 MCP tool adapter | Agent 调用 MCP server |
-| C2 `task` step type | 长任务 checkpoint |
-| C3 pipeline-as-tool | Agent 触发子 pipeline |
-| C4 Streaming LLM + websocket sink | 流式响应 |
-| C5 Langfuse/LangSmith sink | 可选 observability 导出 |
-| C6 WASM LLM 本地模型 | 与现有 wasm transform 结合评估 |
+| MCP Tool | 映射 |
+|----------|------|
+| `eventr_validate` | validate config file/dir |
+| `eventr_test` | run fixture suite |
+| `eventr_plugins_list` | list registered plugins |
+| `eventr_pipeline_status` | GET /admin/pipelines/{name}/status |
+| `eventr_reload` | POST /admin/reload/{name} |
+
+实现计划：[2026-07-01-agent-skill.md](superpowers/plans/2026-07-01-agent-skill.md)
+
+### Phase 2：Pipeline 内 LLM（v2.1，约 3 周）
+
+原 Phase A，顺序后移。详见 [2026-07-01-ai-agent-foundation.md](superpowers/plans/2026-07-01-ai-agent-foundation.md)。
+
+| 任务 | 交付物 |
+|------|--------|
+| 2.1 Provider 接口 + OpenAI/Ollama | `internal/llm/` |
+| 2.2 `llm` / `embed` transform | `plugins/transform/llm/`, `embed/` |
+| 2.3 eql 模板 + LLM 指标 | `internal/eql/template.go`, observability |
+
+### Phase 3：Pipeline 内 Agent（v2.2，约 4 周）
+
+原 Phase B：`agent` transform、tool loop、向量 Sink。
+
+### Phase 4：编排与 MCP 工具双向（v2.3+）
+
+原 Phase C；另含 **eventr 作为 MCP tool 被外部 Agent 调用** 与 **pipeline 内 agent 调用 MCP** 的统一 tool 抽象。
 
 ---
 
@@ -420,9 +465,11 @@ kafka → llm (router)─┼─► llm (support expert) ──► sink
 
 | 文档 | 范围 |
 |------|------|
-| [2026-07-01-ai-agent-foundation.md](superpowers/plans/2026-07-01-ai-agent-foundation.md) | Phase A 详细任务分解（TDD、文件清单） |
-| [configurations.md](configurations.md) | 用户-facing 配置参考（Phase A 完成后更新） |
-| [eventr-design.md §9](../eventr-design.md#9-组件生态规划) | 组件优先级总表 |
+| [2026-07-01-agent-skill.md](superpowers/plans/2026-07-01-agent-skill.md) | **Phase 0–1b** Agent Skill + CLI JSON + MCP |
+| [2026-07-01-ai-agent-foundation.md](superpowers/plans/2026-07-01-ai-agent-foundation.md) | Phase 2 管道内 LLM（TDD 任务分解） |
+| [skills/eventr/SKILL.md](../skills/eventr/SKILL.md) | Agent 操作手册（skills.sh 发布） |
+| [skills/README.md](../skills/README.md) | 安装：`npx skills add deeploop-ai/eventr@eventr` |
+| [configurations.md](configurations.md) | 配置字段参考 |
 
 ---
 
@@ -447,4 +494,4 @@ kafka → llm (router)─┼─► llm (support expert) ──► sink
 
 ---
 
-> 下一步：执行 [Phase A 实现计划](superpowers/plans/2026-07-01-ai-agent-foundation.md)，交付 `llm` transform + OpenAI/Ollama provider。
+> 下一步：**Phase 1a** — `eventr plugins list` 与 `validate --format json`；**Phase 1b** — MCP Server。Pipeline 内 LLM 见 Phase 2 计划。

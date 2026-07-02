@@ -1,8 +1,10 @@
-# AI/Agent Phase A: LLM Foundation Implementation Plan
+# AI/Agent Phase 2: In-Pipeline LLM Foundation Implementation Plan
+
+> **Prerequisite:** Phase 0 Agent Skill complete — see [2026-07-01-agent-skill.md](2026-07-01-agent-skill.md).
 
 > **For agentic workers:** Use superpowers:subagent-driven-development or superpowers:executing-plans to implement task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Deliver `llm` and `embed` transforms with OpenAI-compatible and Ollama providers, eql message templates, and LLM observability metrics — enabling classify/enrich/RAG-ingest pipelines in eventr v2.1.
+**Goal:** Deliver `llm` and `embed` transforms with OpenAI-compatible and Ollama providers — **after** external agents can author and validate pipelines via Skill/CLI/MCP.
 
 **Architecture:** Provider interface in `internal/llm/`; transforms register via existing `registry.RegisterTransform`; eql templates compile at init; metrics hook into `internal/observability/metrics.go`.
 
